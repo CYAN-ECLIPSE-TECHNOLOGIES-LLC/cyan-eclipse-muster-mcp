@@ -158,6 +158,19 @@ class TestDrafting(unittest.TestCase):
         self.assertNotIn("fixed", low)
         self.assertNotIn("refund", low)
 
+    def test_draft_greeting_blank_requester_name(self):
+        """BUG-B regression: a whitespace-only requester name made
+        str(name).split()[0] raise IndexError in the greeting. The
+        draft must fall back to the neutral greeting; an empty name
+        takes the same path."""
+        for blank in ("   ", ""):
+            state = ingest_all(fresh_state())
+            person = state["records"]["person-zendesk-2002"]
+            person["fields"]["name"]["value"] = blank
+            out = S.t_reply_draft(state, {"ticket_id": "ticket-zd-9001"})
+            first_line = out["draft"]["body"].splitlines()[0]
+            self.assertEqual(first_line, "Hello,")
+
     def test_injection_quarantined_never_obeyed(self):
         """Herald Law #1: the instruction-shaped customer message is
         ingested as DATA — flagged quarantined, excluded from the

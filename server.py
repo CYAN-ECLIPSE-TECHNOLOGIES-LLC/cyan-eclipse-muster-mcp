@@ -597,8 +597,12 @@ def t_reply_draft(state, args):
                 quarantined_seen.append(msg.get("message_id"))
     resolution = fact(ticket, "resolution")
     lines = []
-    if requester_name:
-        lines.append(f"Hello {str(requester_name).split()[0]},")
+    # A whitespace-only name is truthy but splits to nothing — the
+    # bare split()[0] raised IndexError. Fall back to the neutral
+    # greeting whenever no name token survives the split.
+    name_parts = str(requester_name).split() if requester_name else []
+    if name_parts:
+        lines.append(f"Hello {name_parts[0]},")
     else:
         lines.append("Hello,")
     if subject:
