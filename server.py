@@ -196,17 +196,52 @@ def emit_receipt(state: dict, rtype: str, detail: dict) -> dict:
     return entry
 
 
-def verify_receipt_chain(receipts) -> bool:
+def verify_receipt_chain_detail(receipts) -> dict:
+    """QA-PATTERNS P6 cure (MUSTER-13, 2026-11-13): verification used
+    to return a bare bool, so a broken chain surfaced as one
+    `chain_valid: false` field and the divergence point was never
+    named. This returns the FIRST diverging receipt (its seq and the
+    reason) so the point of use can render a banner-class warning
+    naming that point."""
     prev = "GENESIS"
     for entry in receipts:
+        seq = entry.get("seq")
         if entry.get("prev_hash") != prev:
-            return False
+            return {"valid": False, "divergence_seq": seq,
+                    "reason": "prev_hash does not match the "
+                              "preceding receipt's hash"}
         expected = sha(prev + canon(
             {k: v for k, v in entry.items() if k != "hash"}))
         if entry.get("hash") != expected:
-            return False
+            return {"valid": False, "divergence_seq": seq,
+                    "reason": "receipt hash does not recompute "
+                              "from its contents"}
         prev = entry["hash"]
-    return True
+    return {"valid": True, "divergence_seq": None, "reason": None}
+
+
+def verify_receipt_chain(receipts) -> bool:
+    return verify_receipt_chain_detail(receipts)["valid"]
+
+
+def integrity_warning(receipts):
+    """Banner-class integrity warning for a diverged chain, or None
+    when the chain verifies. A bool, chip, pill, status row, or log
+    line does NOT satisfy P6 — callers surface this object whole."""
+    detail = verify_receipt_chain_detail(receipts)
+    if detail["valid"]:
+        return None
+    seq = detail["divergence_seq"]
+    return {
+        "class": "banner", "severity": "critical",
+        "title": "INTEGRITY WARNING — receipt chain divergence",
+        "divergence_seq": seq,
+        "message": (
+            f"INTEGRITY WARNING: the receipt chain diverges at "
+            f"receipt seq {seq} ({detail['reason']}). Receipts at "
+            f"and after seq {seq} must not be trusted until the "
+            f"divergence is investigated."),
+        "chain_valid": False}
 
 
 # ----------------------------------------------------------------- masking
@@ -790,8 +825,18 @@ def t_receipt_list(state, args):
     receipts = state["receipts"]
     if limit is not None:
         receipts = receipts[-int(limit):]
-    return {"receipts": receipts, "count": len(state["receipts"]),
-            "chain_valid": verify_receipt_chain(state["receipts"])}
+    detail = verify_receipt_chain_detail(state["receipts"])
+    out = {"receipts": receipts, "count": len(state["receipts"]),
+           "chain_valid": detail["valid"],
+           "chain_divergence_seq": detail["divergence_seq"],
+           "chain_divergence_reason": detail["reason"]}
+    warning = integrity_warning(state["receipts"])
+    if warning is not None:
+        # P6: the warning is a top-level banner-class field of the
+        # result — the point of use cannot render this result
+        # without encountering it.
+        out["integrity_warning"] = warning
+    return out
 
 
 TOOLS = {

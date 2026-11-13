@@ -475,6 +475,37 @@ class TestDrafting(unittest.TestCase):
         self.assertNotIn("forwarded", blob)
 
 
+class TestP6IntegrityWarning(unittest.TestCase):
+    """QA-PATTERNS P6 / MUSTER-13: a tampered receipt must surface a
+    banner-class warning NAMING the divergence seq at the point of
+    use (receipt_list) — not a bare bool."""
+
+    def test_tamper_names_seq_in_banner(self):
+        state = ingest_all(fresh_state())
+        S.t_record_search(state, {"kind": "person", "query": "maya"})
+        clean = S.t_receipt_list(state, {})
+        self.assertTrue(clean["chain_valid"])
+        self.assertNotIn("integrity_warning", clean)
+        target = state["receipts"][2]
+        target["detail"]["verdict"] = "FORGED"
+        out = S.t_receipt_list(state, {})
+        self.assertFalse(out["chain_valid"])
+        self.assertEqual(out["chain_divergence_seq"], target["seq"])
+        warning = out["integrity_warning"]
+        self.assertEqual(warning["class"], "banner")
+        self.assertEqual(warning["severity"], "critical")
+        self.assertIn(str(target["seq"]), warning["message"])
+        self.assertIn("INTEGRITY WARNING", warning["message"])
+
+    def test_linkage_break_names_following_seq(self):
+        state = ingest_all(fresh_state())
+        state["receipts"][1]["prev_hash"] = "FORGED"
+        detail = S.verify_receipt_chain_detail(state["receipts"])
+        self.assertFalse(detail["valid"])
+        self.assertEqual(detail["divergence_seq"],
+                         state["receipts"][1]["seq"])
+
+
 class TestPolicy(unittest.TestCase):
     def test_tier_floor_lowering_rejected_at_load(self):
         import tempfile
