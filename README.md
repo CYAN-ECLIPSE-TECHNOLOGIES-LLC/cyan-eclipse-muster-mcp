@@ -10,7 +10,7 @@ A customer is one person; their records live in a CRM, a helpdesk, and often a s
 
 ## Status — honest labels
 
-v0.1.0, phase **C0 (shared core)**. Local stdio transport, Python stdlib only. **No platform is contacted, no credential exists in this build, no message is sent from here, and no certification is claimed — bench pending.** The shipped fixtures and the server's default state are synthetic (C0). The tree also ships C1 loader tooling (`tools/c1_loader.py`, `tools/c1_loader_slices.py`) that ingests real records through the same governed `record_ingest` path into a separate estate C1 store; that store is not fixture data and the C0 label does not describe it. Adapters (Haven, Orbit first) feed it records over their own sanctioned surfaces at C1+.
+v0.1.1, phase **C0 (shared core)**. Local stdio transport, Python stdlib only. **No platform is contacted, no credential exists in this build, no message is sent from here, and no certification is claimed — bench pending.** The shipped fixtures and the server's default state are synthetic (C0). The tree also ships C1 loader tooling (`tools/c1_loader.py`, `tools/c1_loader_slices.py`) that ingests real records through the same governed `record_ingest` path into a separate estate C1 store; that store is not fixture data and the C0 label does not describe it. Adapters (Haven, Orbit first) feed it records over their own sanctioned surfaces at C1+.
 
 ## The Customer Graph
 

@@ -609,6 +609,40 @@ class TestP7Retention(unittest.TestCase):
         self.assertTrue(merge["snapshot"]["snapshot_hash"])
 
 
+class TestP5VersionLockstep(unittest.TestCase):
+    """QA-PATTERNS P5 / MUSTER-12: every version surface in the repo
+    must agree — server.json (both fields), pyproject, VERSION,
+    server.py docstring + serverInfo, README status, manifest
+    status. A binary change without a bump breaks this test the
+    next time any surface is edited alone."""
+
+    ROOT = Path(__file__).parent.parent
+
+    def test_all_version_surfaces_agree(self):
+        version = (self.ROOT / "VERSION").read_text().strip()
+        self.assertEqual(version, "0.1.1")
+        pyproject = (self.ROOT / "pyproject.toml").read_text()
+        self.assertIn(f'version = "{version}"', pyproject)
+        server_json = json.loads((self.ROOT / "server.json")
+                                 .read_text())
+        self.assertEqual(server_json["version"], version)
+        self.assertEqual(server_json["packages"][0]["version"],
+                         version)
+        server_py = (self.ROOT / "server.py").read_text()
+        self.assertIn(f"Eclipse Muster MCP — v{version}", server_py)
+        self.assertIn(f'"version": "{version}"', server_py)
+        readme = (self.ROOT / "README.md").read_text()
+        self.assertIn(f"v{version}, phase", readme)
+        manifest = json.loads((self.ROOT / "bazaar-manifest.json")
+                              .read_text())
+        self.assertIn(f"v{version}", manifest["status"])
+        # initialize handshake reports the same version.
+        resp = S.handle({"method": "initialize", "id": 1,
+                         "params": {}})
+        self.assertEqual(
+            resp["result"]["serverInfo"]["version"], version)
+
+
 class TestP2Disclosure(unittest.TestCase):
     """QA-PATTERNS P2 / MUSTER-10: every certification / scope
     sentence in the repo's disclosure surfaces must agree with the
