@@ -486,6 +486,25 @@ class TestDrafting(unittest.TestCase):
         self.assertNotIn("fixed", low)
         self.assertNotIn("refund", low)
 
+    def test_draft_carries_ai_attribution_p4(self):
+        """QA-PATTERNS P4 / MUSTER-11: the draft object AND its body
+        (the exported rendering) carry an explicit AI-agent author
+        marker; no untouched/human content gains the marker (the
+        marker exists only on drafts, which are wholly agent-made).
+        """
+        state = ingest_all(fresh_state())
+        out = S.t_reply_draft(state, {"ticket_id": "ticket-zd-9001"})
+        draft = out["draft"]
+        self.assertEqual(draft["author"]["type"], "ai_agent")
+        self.assertEqual(draft["author"]["tool"], "reply_draft")
+        self.assertIn("AI-AGENT-AUTHORED", draft["attribution"])
+        self.assertIn("AI agent", draft["body"])
+        self.assertIn("reply_draft", draft["body"])
+        # The stored draft (what an export reads) carries it too.
+        stored = state["drafts"][draft["draft_id"]]
+        self.assertEqual(stored["author"], draft["author"])
+        self.assertIn("AI-AGENT-AUTHORED", stored["attribution"])
+
     def test_draft_greeting_blank_requester_name(self):
         """BUG-B regression: a whitespace-only requester name made
         str(name).split()[0] raise IndexError in the greeting. The
