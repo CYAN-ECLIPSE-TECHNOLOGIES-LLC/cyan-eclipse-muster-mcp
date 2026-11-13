@@ -568,6 +568,58 @@ def merge_evidence(a: dict, b: dict) -> dict:
                        "classes; matching is evidence, not proof"}
 
 
+def compute_merged_record(a: dict, b: dict, kind: str,
+                          merged_id: str) -> dict:
+    """QA-PATTERNS P8 cure (MUSTER-15, 2026-11-13): ONE computation
+    for the merged record, used by BOTH merge_propose (to render the
+    preview) and merge_execute (to apply). Previously propose
+    computed evidence over name fields while execute computed the
+    result by a separate first-value-wins path, and the result was
+    never previewed — preview and apply were different code paths.
+    Per-platform values survive: a conflicting second value is
+    retained under a platform-suffixed field key."""
+    merged_fields = {}
+    for source in (a, b):
+        for field, fv in source["fields"].items():
+            if field not in merged_fields:
+                merged_fields[field] = json.loads(json.dumps(fv))
+            elif canon(merged_fields[field]["value"]) != \
+                    canon(fv["value"]):
+                plat = fv["provenance"]["platform"]
+                merged_fields[f"{field}@{plat}"] = json.loads(
+                    json.dumps(fv))
+    return {
+        "record_id": merged_id, "kind": kind,
+        "external_ids": {**a["external_ids"], **b["external_ids"]},
+        "fields": merged_fields,
+        "data_rights": json.loads(json.dumps(a["data_rights"])),
+        "status": "active",
+        "merged_from": [a["record_id"], b["record_id"]],
+    }
+
+
+def preview_merged_record(merged: dict) -> dict:
+    """The preview rendering of a computed merged record: the same
+    object execute will store, rendered through the analytic egress
+    masks (external_ids hashed per MUSTER-9). A caller comparing
+    this preview against record_read(analytic) of the executed
+    record compares equal, field for field."""
+    return {"record_id": merged["record_id"],
+            "kind": merged["kind"],
+            "external_ids": masked_external_ids(merged),
+            "fields": {field: mask_value(field, fv["value"],
+                                         "analytic")
+                       for field, fv in merged["fields"].items()},
+            "data_rights": merged["data_rights"],
+            "merged_from": list(merged["merged_from"])}
+
+
+def _preview_hash(merged: dict) -> str:
+    return sha(canon({k: merged[k] for k in (
+        "record_id", "kind", "external_ids", "fields",
+        "data_rights", "merged_from")}))
+
+
 def t_merge_propose(state, args):
     check_kill(POLICY, "internal_write")
     a = get_record(state, args.get("record_a"))
@@ -587,6 +639,16 @@ def t_merge_propose(state, args):
     proposal["proposal_hash"] = sha(canon(
         {k: proposal[k] for k in ("proposal_id", "kind", "record_a",
                                   "record_b", "evidence")}))
+    # P8: compute the result NOW, through the same function execute
+    # will use, and bind the proposal to its hash. Execute refuses
+    # if the recomputed result no longer matches this preview.
+    merged_id = f"{proposal['kind']}-merged-" \
+                f"{proposal['proposal_hash'][:8]}"
+    merged_preview = compute_merged_record(a, b, proposal["kind"],
+                                           merged_id)
+    proposal["preview_merged_record"] = preview_merged_record(
+        merged_preview)
+    proposal["preview_hash"] = _preview_hash(merged_preview)
     state["proposals"][proposal_id] = proposal
     receipt = emit_receipt(state, "merge_proposed", {
         "proposal_id": proposal_id,
@@ -625,24 +687,18 @@ def t_merge_execute(state, args):
                 "record_b": json.loads(json.dumps(b))}
     merged_id = f"{proposal['kind']}-merged-" \
                 f"{proposal['proposal_hash'][:8]}"
-    merged_fields = {}
-    for source in (a, b):
-        for field, fv in source["fields"].items():
-            if field not in merged_fields:
-                merged_fields[field] = fv
-            # per-platform values are never destroyed: a conflicting
-            # second value is retained under a platform-suffixed key.
-            elif canon(merged_fields[field]["value"]) != canon(fv["value"]):
-                plat = fv["provenance"]["platform"]
-                merged_fields[f"{field}@{plat}"] = fv
-    merged = {
-        "record_id": merged_id, "kind": proposal["kind"],
-        "external_ids": {**a["external_ids"], **b["external_ids"]},
-        "fields": merged_fields,
-        "data_rights": a["data_rights"],
-        "ingested_at": now_iso(), "status": "active",
-        "merged_from": [a["record_id"], b["record_id"]],
-    }
+    # P8 (MUSTER-15): apply through the SAME computation the
+    # proposal previewed, and refuse if the records have moved
+    # since the preview — a stale preview never silently applies a
+    # different result.
+    merged = compute_merged_record(a, b, proposal["kind"], merged_id)
+    if proposal.get("preview_hash") and \
+            _preview_hash(merged) != proposal["preview_hash"]:
+        raise ToolError(
+            "PREVIEW_DIVERGED: the merged result no longer matches "
+            "the proposal preview (a source record changed after "
+            "proposing); re-run merge_propose for a fresh preview")
+    merged["ingested_at"] = now_iso()
     state["records"][merged_id] = merged
     a["status"] = "merged_into"
     b["status"] = "merged_into"

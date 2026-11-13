@@ -401,6 +401,52 @@ class TestMerge(unittest.TestCase):
             "merged_into")
         return state, res
 
+    def test_preview_equals_apply_p8(self):
+        """QA-PATTERNS P8 / MUSTER-15: for the fixture pair, the
+        proposal's previewed merged record must equal the executed
+        record field-for-field (compared through the analytic read
+        surface, the preview's rendering), including metadata."""
+        state = ingest_all(fresh_state())
+        out = S.t_merge_propose(state, {
+            "record_a": "person-hubspot-1001",
+            "record_b": "person-zendesk-2002"})
+        proposal = out["proposal"]
+        preview = proposal["preview_merged_record"]
+        token = S.expected_merge_token(proposal)
+        res = S.t_merge_execute(state, {
+            "proposal_id": proposal["proposal_id"],
+            "confirm_token": token})
+        self.assertEqual(res["merged_record_id"],
+                         preview["record_id"])
+        applied = S.t_record_read(
+            state, {"record_id": res["merged_record_id"],
+                    "surface": "analytic"})
+        self.assertEqual(applied["fields"], preview["fields"])
+        self.assertEqual(applied["external_ids"],
+                         preview["external_ids"])
+        self.assertEqual(applied["data_rights"],
+                         preview["data_rights"])
+        self.assertEqual(applied["kind"], preview["kind"])
+        stored = state["records"][res["merged_record_id"]]
+        self.assertEqual(stored["merged_from"],
+                         preview["merged_from"])
+
+    def test_stale_preview_refused_p8(self):
+        """If a source record changes after proposing, execute must
+        refuse rather than apply a result the preview never showed."""
+        state = ingest_all(fresh_state())
+        out = S.t_merge_propose(state, {
+            "record_a": "person-hubspot-1001",
+            "record_b": "person-zendesk-2002"})
+        proposal = out["proposal"]
+        state["records"]["person-zendesk-2002"]["fields"][
+            "timezone"]["value"] = "America/New_York"
+        with self.assertRaises(S.ToolError) as ctx:
+            S.t_merge_execute(state, {
+                "proposal_id": proposal["proposal_id"],
+                "confirm_token": S.expected_merge_token(proposal)})
+        self.assertIn("PREVIEW_DIVERGED", str(ctx.exception))
+
     def test_unmerge_restores_prior_state(self):
         state, res = self.test_propose_only_until_confirmed()
         merge_id = res["merge_id"]
