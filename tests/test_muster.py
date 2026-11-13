@@ -609,6 +609,44 @@ class TestP7Retention(unittest.TestCase):
         self.assertTrue(merge["snapshot"]["snapshot_hash"])
 
 
+class TestP2Disclosure(unittest.TestCase):
+    """QA-PATTERNS P2 / MUSTER-10: every certification / scope
+    sentence in the repo's disclosure surfaces must agree with the
+    others and with the build. Inventory: README.md, PYPI_README.md,
+    bazaar-manifest.json."""
+
+    ROOT = Path(__file__).parent.parent
+
+    def _texts(self):
+        return {
+            "README": (self.ROOT / "README.md").read_text(),
+            "PYPI_README": (self.ROOT / "PYPI_README.md").read_text(),
+            "manifest": (self.ROOT / "bazaar-manifest.json")
+            .read_text(),
+        }
+
+    def test_no_certification_claimed_anywhere(self):
+        for name, text in self._texts().items():
+            low = text.lower()
+            self.assertNotIn("certified (local)", low, name)
+            self.assertNotIn("certified(local)", low, name)
+            self.assertIn("no certification", low, name)
+        manifest = json.loads(self._texts()["manifest"])
+        self.assertFalse(manifest["bench"]["certified"])
+        self.assertIn("no certification",
+                      manifest["bench"]["bench_verdict"].lower())
+        self.assertIn("no certification",
+                      manifest["bench"]["status"].lower())
+        self.assertIn("no certification",
+                      manifest["status"].lower())
+
+    def test_c1_loaders_disclosed_not_c0_only(self):
+        for name in ("README", "PYPI_README"):
+            text = self._texts()[name]
+            self.assertIn("c1_loader", text, name)
+            self.assertNotIn("synthetic fixtures only", text, name)
+
+
 class TestP6IntegrityWarning(unittest.TestCase):
     """QA-PATTERNS P6 / MUSTER-13: a tampered receipt must surface a
     banner-class warning NAMING the divergence seq at the point of
