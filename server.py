@@ -228,6 +228,41 @@ _EMAIL_SHAPE = re.compile(
 _PHONE_SHAPE = re.compile(
     r"(?<!\d)(?:\+1[\s.\-]?)?(?:\(\d{3}\)\s?|\d{3}[\s.\-])"
     r"\d{3}[\s.\-]\d{4}(?!\d)")
+# QA-PATTERNS P1 cure (MUSTER-9, 2026-11-13): the content scrub used
+# to cover email/phone shapes only, so SSN-shaped and card-shaped
+# content inside a free-text field (notes, conversation bodies,
+# ticket subjects) passed verbatim on every surface. Government-ID
+# and payment field classes are nulled on BOTH surfaces, so their
+# content shapes are scrubbed on both surfaces too.
+_SSN_SHAPE = re.compile(r"(?<!\d)\d{3}-\d{2}-\d{4}(?!\d)")
+_CARD_CANDIDATE = re.compile(r"(?<!\d)(?:\d[ \-]*){12,18}\d(?!\d)")
+
+
+def _luhn_ok(digits: str) -> bool:
+    total, alt = 0, False
+    for ch in reversed(digits):
+        d = int(ch)
+        if alt:
+            d *= 2
+            if d > 9:
+                d -= 9
+        total += d
+        alt = not alt
+    return total % 10 == 0
+
+
+def _mask_sensitive_content(text: str) -> str:
+    """Scrub SSN-shaped and (Luhn-valid) card-shaped substrings.
+    Applied on every surface: these classes are null-class."""
+    text = _SSN_SHAPE.sub("***", text)
+
+    def card_repl(match):
+        digits = "".join(ch for ch in match.group(0) if ch.isdigit())
+        if 13 <= len(digits) <= 19 and _luhn_ok(digits):
+            return "***"
+        return match.group(0)
+
+    return _CARD_CANDIDATE.sub(card_repl, text)
 
 
 def _mask_content(text: str) -> str:
@@ -240,13 +275,24 @@ def _mask_content(text: str) -> str:
         return f"***{digits[-2:]}" if len(digits) >= 2 else "***"
 
     return _PHONE_SHAPE.sub(phone_repl,
-                            _EMAIL_SHAPE.sub(email_repl, text))
+                            _EMAIL_SHAPE.sub(
+                                email_repl,
+                                _mask_sensitive_content(text)))
 
 
 def mask_value(field: str, value, surface: str):
     """Deep Field-style egress masking (spec 5.5)."""
     if isinstance(value, list):
         return [mask_value(field, item, surface) for item in value]
+    if isinstance(value, dict):
+        # P1 cure (MUSTER-9): structured values (conversation
+        # messages are lists of dicts) used to pass through verbatim
+        # because mask_value never recursed into dicts. Recurse with
+        # each sub-key as the field name so by-name classes inside a
+        # structure mask too, and string leaves get the content scrub
+        # for their surface.
+        return {key: mask_value(str(key), item, surface)
+                for key, item in value.items()}
     name = field.lower()
     if any(marker in name for marker in NULL_FIELD_MARKERS):
         return None
@@ -267,12 +313,36 @@ def mask_value(field: str, value, surface: str):
         # covered class by name can still carry that class as content.
         # Mask it with the class rendering.
         return _mask_content(value)
+    if isinstance(value, str):
+        # Owner surface: prose renders in full EXCEPT the null
+        # classes (government-ID / payment shapes), which are nulled
+        # by name on both surfaces and are scrubbed as content on
+        # both surfaces too (MUSTER-9).
+        return _mask_sensitive_content(value)
     return value
 
 
 def masked_fields(record: dict, surface: str) -> dict:
     return {field: mask_value(field, fv["value"], surface)
             for field, fv in record["fields"].items()}
+
+
+def masked_external_ids(record: dict) -> dict:
+    """P1 cure (MUSTER-9): external_ids used to be returned raw on
+    both surfaces — platform identifiers are still identifiers, and
+    a caller-supplied external id can itself carry personal data.
+    Egress renders each value as a truncated SHA-256 so records stay
+    correlatable across reads without the raw value crossing the
+    boundary. Internal lookups use the stored values, never this
+    rendering."""
+    return {key: f"sha256:{sha(str(val))[:12]}"
+            for key, val in (record.get("external_ids") or {}).items()}
+
+
+def validate_surface(surface: str) -> str:
+    if surface not in ("owner", "analytic"):
+        raise ToolError("surface must be 'owner' or 'analytic'")
+    return surface
 
 
 # ------------------------------------------------------------- record core
@@ -379,14 +449,13 @@ def get_record(state, record_id):
 def t_record_read(state, args):
     check_kill(POLICY, "read")
     record = get_record(state, args.get("record_id"))
-    surface = str(args.get("surface") or "analytic").lower()
-    if surface not in ("owner", "analytic"):
-        raise ToolError("surface must be 'owner' or 'analytic'")
+    surface = validate_surface(
+        str(args.get("surface") or "analytic").lower())
     receipt = emit_receipt(state, "record_read", {
         "record_id": record["record_id"], "kind": record["kind"],
         "tier": 0, "surface": surface, "verdict": "ALLOW"})
     return {"record_id": record["record_id"], "kind": record["kind"],
-            "external_ids": record["external_ids"],
+            "external_ids": masked_external_ids(record),
             "fields": masked_fields(record, surface),
             "provenance": {f: fv["provenance"]
                            for f, fv in record["fields"].items()},
@@ -398,7 +467,12 @@ def t_record_search(state, args):
     check_kill(POLICY, "read")
     kind = str(args.get("kind") or "").lower()
     query = str(args.get("query") or "").lower()
-    surface = str(args.get("surface") or "analytic").lower()
+    # P1 cure (MUSTER-9): search never validated its surface, so a
+    # bogus surface string skipped every analytic mask. Validate
+    # exactly as record_read does — an unknown surface is an error,
+    # never an unmasked rendering.
+    surface = validate_surface(
+        str(args.get("surface") or "analytic").lower())
     hits = []
     for record in state["records"].values():
         if record.get("status") == "merged_into":
@@ -646,14 +720,24 @@ def t_reply_draft(state, args):
         lines.append(f"Hello {name_parts[0]},")
     else:
         lines.append("Hello,")
+    # P1 cure (MUSTER-9): interpolated facts used to enter the draft
+    # raw — a card number, phone, email, or SSN sitting in a ticket
+    # subject/resolution was quoted verbatim into the draft body.
+    # Every interpolated value now passes the full content scrub
+    # (sensitive shapes on all surfaces + email/phone shapes) before
+    # it can appear in a draft.
     if subject:
         lines.append(
-            f"Thank you for contacting us about: {subject}.")
+            f"Thank you for contacting us about: "
+            f"{_mask_content(str(subject))}.")
     if status:
-        lines.append(f"Your ticket is currently recorded as: {status}.")
+        lines.append(
+            f"Your ticket is currently recorded as: "
+            f"{_mask_content(str(status))}.")
     missing = []
     if resolution:
-        lines.append(f"Recorded resolution: {resolution}")
+        lines.append(
+            f"Recorded resolution: {_mask_content(str(resolution))}")
     else:
         missing.append("resolution")
         lines.append(
@@ -691,8 +775,13 @@ def t_policy_show(state, args):
                         "free-text content": "analytic: email-shaped "
                         "substrings masked domain-only and "
                         "phone-shaped substrings masked last-2 "
-                        "(GAP-C1-1); owner: unmasked",
+                        "(GAP-C1-1); SSN-shaped and card-shaped "
+                        "substrings masked on every surface; "
+                        "structured values (conversation messages) "
+                        "masked recursively (MUSTER-9)",
                         "phone": "partial (last 2)",
+                        "external_ids": "truncated sha256 hash on "
+                        "every surface (MUSTER-9)",
                         "gov_id/payment/health fields": "null (v1)"}}
 
 

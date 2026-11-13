@@ -246,9 +246,124 @@ class TestContentMasking(unittest.TestCase):
                             m in lowered
                             for m in S.NULL_FIELD_MARKERS):
                         continue
+                    # MUSTER-9 (P1): structured values (the
+                    # conversation `messages` list-of-dicts) are now
+                    # deep-masked on analytic — the fixture m2 body
+                    # carries an email shape — so the byte-identical
+                    # guard scopes to scalar fields; structured
+                    # masking is asserted by TestP1SentinelSuite.
+                    if isinstance(fv["value"], (dict, list)) and any(
+                            isinstance(i, dict) for i in
+                            (fv["value"] if isinstance(
+                                fv["value"], list) else [])):
+                        continue
                     self.assertEqual(
                         out["fields"][fname], fv["value"],
                         f"{rid}.{fname} changed on {surface}")
+
+
+class TestP1SentinelSuite(unittest.TestCase):
+    """QA-PATTERNS P1 / MUSTER-9: sentinel values in every field
+    class, driven through every read/search/draft egress on every
+    surface (including an invalid surface). Synthetic values only.
+    Null-class shapes (SSN / payment card) must appear NOWHERE;
+    email/phone shapes must not appear on analytic or in drafts;
+    external_ids must never render raw."""
+
+    SSN = "123-45-6789"
+    CARD = "4111-1111-1111-1111"  # Luhn-valid test number
+    EMAIL = "sentinel.person@secret.example"
+    PHONE = "+1-415-555-0199"
+    EXT = "EXTSENTINEL98765"
+
+    def _state(self):
+        state = fresh_state()
+        S.t_record_ingest(state, _person_payload(
+            "p-sentinel", {}) | {
+                "kind": "person", "external_ids": {"hubspot": self.EXT},
+                "fields": {
+                    "name": "Sentinel Person",
+                    "emails": [self.EMAIL], "phone": self.PHONE,
+                    "notes": f"notes ssn {self.SSN} card {self.CARD} "
+                             f"email {self.EMAIL} phone {self.PHONE}"},
+                "field_provenance": {f: {
+                    "platform": "probe", "platform_object_id": "p",
+                    "source": "import", "observed_at": "2026-11-13"}
+                    for f in ("name", "emails", "phone", "notes")}})
+        conv = _person_payload("c-sentinel", {}) | {
+            "kind": "conversation",
+            "fields": {"messages": [
+                {"author": "customer", "message_id": "x1",
+                 "body": f"body email {self.EMAIL} ssn {self.SSN}"},
+                {"author": "agent", "message_id": "x2",
+                 "body": f"agent note card {self.CARD}"}]},
+            "field_provenance": {"messages": {
+                "platform": "probe", "platform_object_id": "c",
+                "source": "import", "observed_at": "2026-11-13"}}}
+        S.t_record_ingest(state, conv)
+        ticket = _person_payload("t-sentinel", {}) | {
+            "kind": "ticket", "external_ids": {"requester": "p-sentinel"},
+            "fields": {
+                "subject": f"Help card {self.CARD} email {self.EMAIL}",
+                "status": "open",
+                "resolution": f"paid {self.CARD} call {self.PHONE} "
+                              f"ssn {self.SSN}"},
+            "field_provenance": {f: {
+                "platform": "probe", "platform_object_id": "t",
+                "source": "import", "observed_at": "2026-11-13"}
+                for f in ("subject", "status", "resolution")}}
+        S.t_record_ingest(state, ticket)
+        return state
+
+    def test_no_sentinel_on_any_egress(self):
+        state = self._state()
+        outputs = {}
+        for surface in ("analytic", "owner"):
+            outputs[f"read-person-{surface}"] = S.t_record_read(
+                state, {"record_id": "p-sentinel", "surface": surface})
+            outputs[f"read-conv-{surface}"] = S.t_record_read(
+                state, {"record_id": "c-sentinel", "surface": surface})
+            outputs[f"search-{surface}"] = S.t_record_search(
+                state, {"kind": "person", "query": "Sentinel",
+                        "surface": surface})
+        outputs["draft"] = S.t_reply_draft(
+            state, {"ticket_id": "t-sentinel"})
+        for label, out in outputs.items():
+            blob = json.dumps(out)
+            self.assertNotIn(self.SSN, blob, label)
+            self.assertNotIn(self.CARD, blob, label)
+            self.assertNotIn(self.EXT, blob, label)
+            if label.endswith("analytic") or label == "draft" \
+                    or label.startswith("search-analytic"):
+                self.assertNotIn(self.EMAIL, blob, label)
+                self.assertNotIn("415-555-0199", blob, label)
+                self.assertNotIn("4155550199", blob, label)
+
+    def test_invalid_surface_rejected_by_search_and_read(self):
+        state = self._state()
+        for tool, args in (
+                (S.t_record_search, {"surface": "bogus"}),
+                (S.t_record_read, {"record_id": "p-sentinel",
+                                   "surface": "bogus"})):
+            with self.assertRaises(S.ToolError):
+                tool(state, args)
+
+    def test_external_ids_render_as_hashes(self):
+        state = self._state()
+        out = S.t_record_read(state, {"record_id": "p-sentinel",
+                                      "surface": "owner"})
+        self.assertTrue(
+            out["external_ids"]["hubspot"].startswith("sha256:"))
+
+    def test_conversation_bodies_masked_on_analytic(self):
+        state = self._state()
+        out = S.t_record_read(state, {"record_id": "c-sentinel",
+                                      "surface": "analytic"})
+        body = " ".join(m["body"]
+                        for m in out["fields"]["messages"])
+        self.assertIn("***@secret.example", body)
+        self.assertNotIn(self.SSN, body)
+        self.assertNotIn(self.CARD, body)
 
 
 class TestMerge(unittest.TestCase):
