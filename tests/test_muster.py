@@ -179,6 +179,28 @@ class TestContentMasking(unittest.TestCase):
             "Write to ***@example.com, or ***@test.org; "
             "both read it.")
 
+    def test_phone_in_prose(self):
+        """MUS-C1-005 names phone numbers in prose too; the phone
+        field class renders last-2, so prose instances do the same
+        (analytic only)."""
+        state = fresh_state()
+        S.t_record_ingest(state, _person_payload(
+            "person-phone-prose",
+            {"name": "Phone Case",
+             "summary": "Call 415-555-0134 or (415) 555-0135; "
+                        "the +1-415-555-0136 line is recorded."}))
+        analytic = S.t_record_read(
+            state, {"record_id": "person-phone-prose",
+                    "surface": "analytic"})
+        self.assertEqual(
+            analytic["fields"]["summary"],
+            "Call ***34 or ***35; the ***36 line is recorded.")
+        self.assertNotIn("415", analytic["fields"]["summary"])
+        owner = S.t_record_read(
+            state, {"record_id": "person-phone-prose",
+                    "surface": "owner"})
+        self.assertIn("415-555-0134", owner["fields"]["summary"])
+
     def test_ordinary_prose_byte_identical(self):
         prose_cases = [
             "Led all eight desks at 1,475.93 (+47.59%) on "
@@ -191,6 +213,9 @@ class TestContentMasking(unittest.TestCase):
             "fails.",  # obfuscated shape: named false negative
             "Order 771-229 totals 2799 units; batch 36C10B27Q0056 "
             "is an identifier, not contact data.",
+            "The unseparated string 4155550134 and the London "
+            "number +44 20 7946 0958 are outside the NANP shape "
+            "the scrub covers.",  # named false negatives
         ]
         for i, prose in enumerate(prose_cases):
             state = fresh_state()
