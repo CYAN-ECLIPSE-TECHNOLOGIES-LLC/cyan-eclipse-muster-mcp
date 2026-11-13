@@ -483,6 +483,7 @@ def get_record(state, record_id):
 
 def t_record_read(state, args):
     check_kill(POLICY, "read")
+    enforce_retention(state)
     record = get_record(state, args.get("record_id"))
     surface = validate_surface(
         str(args.get("surface") or "analytic").lower())
@@ -500,6 +501,7 @@ def t_record_read(state, args):
 
 def t_record_search(state, args):
     check_kill(POLICY, "read")
+    enforce_retention(state)
     kind = str(args.get("kind") or "").lower()
     query = str(args.get("query") or "").lower()
     # P1 cure (MUSTER-9): search never validated its surface, so a
@@ -510,7 +512,7 @@ def t_record_search(state, args):
         str(args.get("surface") or "analytic").lower())
     hits = []
     for record in state["records"].values():
-        if record.get("status") == "merged_into":
+        if record.get("status") in ("merged_into", "retention_expired"):
             continue
         if kind and record["kind"] != kind:
             continue
@@ -527,6 +529,80 @@ def t_record_search(state, args):
         "query_hash": sha(query) if query else None,
         "hit_count": len(hits), "verdict": "ALLOW"})
     return {"hits": hits, "count": len(hits), "surface": surface}
+
+
+# ------------------------------------------------------- retention (P7)
+# QA-PATTERNS P7 cure (MUSTER-14, 2026-11-13): retention values used
+# to be stamped onto every record (data_rights.retention, default
+# "graph-cache-30d") and never enforced — nothing ever expired, and
+# merge snapshots kept full unmasked pre-merge copies indefinitely.
+# Now: retention is parsed and enforced, expired records are
+# dispositioned byte-level (field values destroyed, hash retained
+# as proof), snapshots are purged on unmerge, and a confirm-gated
+# retention_sweep tool is the erasure-class operation.
+
+def parse_retention_days(retention) -> int | None:
+    if not retention:
+        return None
+    match = re.search(r"(\d+)\s*d(?:ay)?s?\b", str(retention))
+    return int(match.group(1)) if match else None
+
+
+def _parse_iso(text):
+    try:
+        return datetime.fromisoformat(
+            str(text).replace("Z", "+00:00"))
+    except (ValueError, TypeError):
+        return None
+
+
+def enforce_retention(state, now=None) -> list:
+    """Disposition every active record whose retention has expired.
+    Returns the dispositioned record ids. Field VALUES are destroyed
+    (byte-level: the state no longer carries them); a hash of the
+    destroyed fields and the disposition itself are receipted."""
+    now = now or datetime.now(timezone.utc)
+    dispositioned = []
+    for record in state["records"].values():
+        if record.get("status") != "active":
+            continue
+        days = parse_retention_days(
+            (record.get("data_rights") or {}).get("retention"))
+        ingested = _parse_iso(record.get("ingested_at"))
+        if days is None or ingested is None:
+            continue
+        if (now - ingested).days < days:
+            continue
+        fields_hash = sha(canon(
+            {f: fv["value"] for f, fv in record["fields"].items()}))
+        record["fields"] = {}
+        record["status"] = "retention_expired"
+        record["retention_disposition"] = {
+            "disposition": "field values destroyed at retention "
+                           "expiry",
+            "retention": record["data_rights"]["retention"],
+            "fields_hash": fields_hash,
+            "expired_at": now_iso()}
+        emit_receipt(state, "retention_expired", {
+            "record_id": record["record_id"],
+            "kind": record["kind"], "tier": 3,
+            "fields_hash": fields_hash, "verdict": "ALLOW"})
+        dispositioned.append(record["record_id"])
+    return dispositioned
+
+
+def t_retention_sweep(state, args):
+    """Erasure-class operation (P7): confirm-gated. The confirm
+    string must be supplied before anything is destroyed."""
+    check_kill(POLICY, "destructive")
+    if str(args.get("confirm") or "") != "PURGE_EXPIRED":
+        raise ToolError(
+            "CONFIRM_REQUIRED: retention_sweep destroys the field "
+            "values of retention-expired records; pass "
+            "confirm='PURGE_EXPIRED' to proceed")
+    dispositioned = enforce_retention(state)
+    return {"dispositioned_record_ids": dispositioned,
+            "count": len(dispositioned)}
 
 
 # ------------------------------------------------------------ merge engine
@@ -706,7 +782,13 @@ def t_merge_execute(state, args):
     merge_record = {"merge_id": f"merge-{proposal['proposal_hash'][:10]}",
                     "proposal_id": proposal["proposal_id"],
                     "merged_record_id": merged_id,
-                    "snapshot": snapshot, "status": "active"}
+                    "snapshot": snapshot, "status": "active",
+                    # P7 (MUSTER-14): the snapshot's full copies are
+                    # retained ONLY while the merge is active (they
+                    # are the unmerge mechanism) and are purged at
+                    # unmerge, leaving the snapshot hash as proof.
+                    "snapshot_retention": "retained while merge "
+                    "active; purged on unmerge (hash retained)"}
     state["merges"][merge_record["merge_id"]] = merge_record
     receipt = emit_receipt(state, "merge_executed", {
         "merge_id": merge_record["merge_id"],
@@ -746,6 +828,13 @@ def t_merge_unmerge(state, args):
         merged["status"] = "split"
         state["records"].pop(merge["merged_record_id"], None)
     merge["status"] = "unmerged"
+    # P7 (MUSTER-14): unmerge consumes the snapshot — purge the full
+    # pre-merge copies so no unmasked snapshot survives the unmerge
+    # indefinitely. The hash (already receipted at execute) remains.
+    merge["snapshot"] = {
+        "disposition": "purged_on_unmerge",
+        "snapshot_hash": sha(canon(snap)),
+        "purged_at": now_iso()}
     receipt = emit_receipt(state, "merge_unmerged", {
         "merge_id": merge["merge_id"],
         "restored_record_ids": [snap["record_a"]["record_id"],
@@ -967,6 +1056,14 @@ TOOLS = {
         "List the append-only, hash-chained receipts and verify the "
         "chain. Receipts carry IDs + hashes only — never content.",
         {"limit": {"type": "integer"}}, []),
+    "retention_sweep": (
+        t_retention_sweep,
+        "Erasure-class (T3): destroy the field values of every "
+        "record whose stamped retention has expired, leaving a "
+        "hash + disposition receipt. Confirm-gated: requires "
+        "confirm='PURGE_EXPIRED'. Retention is also enforced on "
+        "record_read / record_search.",
+        {"confirm": {"type": "string"}}, ["confirm"]),
 }
 
 # Capability denylist, stated in code: the core sends nothing,

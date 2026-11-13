@@ -521,6 +521,75 @@ class TestDrafting(unittest.TestCase):
         self.assertNotIn("forwarded", blob)
 
 
+class TestP7Retention(unittest.TestCase):
+    """QA-PATTERNS P7 / MUSTER-14: retention is enforced, expired
+    values are destroyed byte-level, the sweep is confirm-gated,
+    and merge snapshots do not survive unmerge."""
+
+    SENTINEL = "RETENTION-SENTINEL-VALUE"
+
+    def _old_record(self, state):
+        S.t_record_ingest(state, _person_payload(
+            "p-old", {"name": "Old Case", "notes": self.SENTINEL}))
+        rec = state["records"]["p-old"]
+        rec["ingested_at"] = "2026-01-01T00:00:00+00:00"
+        rec["data_rights"]["retention"] = "graph-cache-30d"
+        return rec
+
+    def test_sweep_confirm_gated_and_byte_level(self):
+        state = fresh_state()
+        self._old_record(state)
+        with self.assertRaises(S.ToolError) as ctx:
+            S.t_retention_sweep(state, {})
+        self.assertIn("CONFIRM_REQUIRED", str(ctx.exception))
+        # The gate fired before any destruction.
+        self.assertIn(self.SENTINEL, json.dumps(state["records"]))
+        out = S.t_retention_sweep(state, {"confirm": "PURGE_EXPIRED"})
+        self.assertEqual(out["dispositioned_record_ids"], ["p-old"])
+        self.assertNotIn(self.SENTINEL, json.dumps(state["records"]))
+        rec = state["records"]["p-old"]
+        self.assertEqual(rec["status"], "retention_expired")
+        self.assertEqual(rec["fields"], {})
+        self.assertTrue(
+            rec["retention_disposition"]["fields_hash"])
+
+    def test_retention_enforced_on_read(self):
+        state = fresh_state()
+        self._old_record(state)
+        out = S.t_record_read(state, {"record_id": "p-old"})
+        self.assertEqual(out["fields"], {})
+        self.assertNotIn(self.SENTINEL, json.dumps(out))
+
+    def test_unexpired_record_untouched(self):
+        state = fresh_state()
+        S.t_record_ingest(state, _person_payload(
+            "p-new", {"name": "New Case", "notes": self.SENTINEL}))
+        out = S.t_retention_sweep(state, {"confirm": "PURGE_EXPIRED"})
+        self.assertEqual(out["count"], 0)
+        self.assertIn(self.SENTINEL, json.dumps(state["records"]))
+
+    def test_snapshot_purged_on_unmerge(self):
+        state = ingest_all(fresh_state())
+        out = S.t_merge_propose(state, {
+            "record_a": "person-hubspot-1001",
+            "record_b": "person-zendesk-2002"})
+        proposal = out["proposal"]
+        res = S.t_merge_execute(state, {
+            "proposal_id": proposal["proposal_id"],
+            "confirm_token": S.expected_merge_token(proposal)})
+        merge = state["merges"][res["merge_id"]]
+        # While active, the snapshot exists (it IS the unmerge path).
+        self.assertIn("record_a", merge["snapshot"])
+        S.t_merge_unmerge(state, {
+            "merge_id": res["merge_id"],
+            "confirm_token": f"confirm-unmerge-{res['merge_id']}"})
+        merge = state["merges"][res["merge_id"]]
+        self.assertEqual(merge["snapshot"]["disposition"],
+                         "purged_on_unmerge")
+        self.assertNotIn("record_a", merge["snapshot"])
+        self.assertTrue(merge["snapshot"]["snapshot_hash"])
+
+
 class TestP6IntegrityWarning(unittest.TestCase):
     """QA-PATTERNS P6 / MUSTER-13: a tampered receipt must surface a
     banner-class warning NAMING the divergence seq at the point of
@@ -595,7 +664,9 @@ class TestChain(unittest.TestCase):
 
     def test_denylist_surface(self):
         names = {t["name"] for t in S.tool_list()}
-        self.assertEqual(len(names), 9)
+        # 10 since MUSTER-14 added the confirm-gated retention_sweep
+        # (the P7 erasure-class operation); the denylist is unchanged.
+        self.assertEqual(len(names), 10)
         for forbidden in S.FORBIDDEN_TOOL_NAMES:
             self.assertNotIn(forbidden, names)
 

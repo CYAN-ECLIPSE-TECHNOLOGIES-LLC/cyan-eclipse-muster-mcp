@@ -41,7 +41,11 @@ Ticket bodies and messages are foreign content. At ingest, customer-authored mes
 
 Action-class floors are the Environment ladder transposed (reads T0 · internal writes + drafts T1 · sends + graph-merge execution T2 · destructive/platform-merge/automation T3). Floors may be **raised** per account in `policy.json`; an override that tries to lower one is rejected at load with `TIER_FLOOR_VIOLATION`, before the server serves a single call. Kill switches halt reads or writes. Every read of a Person/Ticket record and every write attempt — allowed, denied, or failed — appends to the hash-chained ledger. **Receipts carry IDs, hashes, tiers, and verdicts — never content.**
 
-## Tools (9)
+## Retention — enforced, not just stamped
+
+Every record's Data Rights block carries a retention value (default `graph-cache-30d`). Since the MUSTER-14 cure that value is **enforced**: when a record's retention expires, its field values are destroyed (a hash and a disposition receipt remain as proof), enforcement runs on `record_read` / `record_search`, and the confirm-gated `retention_sweep` tool (`confirm='PURGE_EXPIRED'`, T3) performs the same disposition on demand. Merge snapshots — full pre-merge copies retained only while a merge is active, as the unmerge mechanism — are purged at unmerge, their hash retained. Copy elsewhere in this repo that credits any weaker action (a mode switch, a merge, a delete of a view) with erasure is wrong; retention expiry and `retention_sweep` are the only erasure routes.
+
+## Tools (10)
 
 | Tool | What it does |
 |---|---|
@@ -54,6 +58,7 @@ Action-class floors are the Environment ladder transposed (reads T0 · internal 
 | `reply_draft` | Records-only reply draft with citations + `MISSING_FACT` markers + quarantine report. |
 | `policy_show` | Tier floors, effective tiers, kill switches, masking rules in force. |
 | `receipt_list` | List the hash-chained ledger and verify it. |
+| `retention_sweep` | Erasure-class (T3, confirm-gated): destroy field values of retention-expired records. |
 
 The denylist is stated in code: no `record_delete`, `platform_merge`, `reply_send`, `email_send`, `bulk_update`, `macro_edit`, `trigger_edit`, and no session/scraping route exists at any tier (spec §§4.1, 6.2).
 
