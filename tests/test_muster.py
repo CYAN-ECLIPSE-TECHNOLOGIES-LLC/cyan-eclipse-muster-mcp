@@ -84,6 +84,148 @@ class TestMasking(unittest.TestCase):
         self.assertNotIn("415-555-0134", ledger)
 
 
+def _person_payload(record_id, fields):
+    prov = {"platform": "cyan-eclipse-relationship-map",
+            "platform_object_id": record_id,
+            "source": "import",
+            "observed_at": "2026-11-13",
+            "adapter_version": "test"}
+    return {"kind": "person", "record_id": record_id,
+            "fields": fields,
+            "field_provenance": {f: dict(prov) for f in fields},
+            "data_rights": {"source_account": "test",
+                            "legal_basis": "test",
+                            "method": "test",
+                            "pii_class": "strictest"}}
+
+
+class TestContentMasking(unittest.TestCase):
+    """GAP-C1-1: an email address inside a free-text field must mask
+    on the analytic surface exactly as the email field class does,
+    while the owner surface and ordinary prose stay byte-identical."""
+
+    SUMMARY = ("President/CEO of Elite Business Strategies; the "
+               "steven@cetech.ai gate probe cleared for the sends.")
+
+    def _state_with_filed_case(self):
+        state = fresh_state()
+        S.t_record_ingest(state, _person_payload(
+            "person-filed-case",
+            {"name": "Ryan Owens",
+             "emails": ["ryan@cetech.ai"],
+             "summary": "CEO on the published team page; reachable "
+                        "at ryan@cetech.ai."}))
+        return state
+
+    def test_filed_case_regression(self):
+        state = self._state_with_filed_case()
+        analytic = S.t_record_read(
+            state, {"record_id": "person-filed-case",
+                    "surface": "analytic"})
+        # The prose email is masked with the email-class rendering;
+        # the sentence-final period survives.
+        self.assertEqual(
+            analytic["fields"]["summary"],
+            "CEO on the published team page; reachable "
+            "at ***@cetech.ai.")
+        self.assertEqual(analytic["fields"]["emails"],
+                         ["***@cetech.ai"])
+        self.assertNotIn("ryan@cetech.ai",
+                         json.dumps(analytic["fields"]))
+        # Owner surface renders the stored prose in full.
+        owner = S.t_record_read(
+            state, {"record_id": "person-filed-case",
+                    "surface": "owner"})
+        self.assertEqual(
+            owner["fields"]["summary"],
+            "CEO on the published team page; reachable "
+            "at ryan@cetech.ai.")
+        self.assertEqual(owner["fields"]["emails"],
+                         ["ryan@cetech.ai"])
+        # The stored record itself is untouched (egress-only cure).
+        stored = state["records"]["person-filed-case"]
+        self.assertEqual(stored["fields"]["summary"]["value"],
+                         "CEO on the published team page; reachable "
+                         "at ryan@cetech.ai.")
+
+    def test_second_live_instance_and_search_surface(self):
+        state = fresh_state()
+        S.t_record_ingest(state, _person_payload(
+            "person-second-case",
+            {"name": "Princess Ousley", "summary": self.SUMMARY}))
+        hits = S.t_record_search(
+            state, {"kind": "person", "query": "Elite",
+                    "surface": "analytic"})["hits"]
+        self.assertEqual(len(hits), 1)
+        self.assertEqual(
+            hits[0]["fields"]["summary"],
+            "President/CEO of Elite Business Strategies; the "
+            "***@cetech.ai gate probe cleared for the sends.")
+        self.assertNotIn("steven@cetech.ai",
+                         json.dumps(hits[0]["fields"]))
+
+    def test_multiple_emails_one_field(self):
+        state = fresh_state()
+        S.t_record_ingest(state, _person_payload(
+            "person-multi",
+            {"name": "Multi Case",
+             "summary": "Write to a@example.com, or "
+                        "b@test.org; both read it."}))
+        analytic = S.t_record_read(
+            state, {"record_id": "person-multi",
+                    "surface": "analytic"})
+        self.assertEqual(
+            analytic["fields"]["summary"],
+            "Write to ***@example.com, or ***@test.org; "
+            "both read it.")
+
+    def test_ordinary_prose_byte_identical(self):
+        prose_cases = [
+            "Led all eight desks at 1,475.93 (+47.59%) on "
+            "2026-11-01; five straight days of outflows ~$1.44B.",
+            "Version 0.1.0 shipped 2026-10-24; window "
+            "2026-11-11 to 2027-02-11; calls at 08:22 ET.",
+            "Known as GitHub @TayyDtb and @acevvswhite on the "
+            "socials; no address printed.",
+            "Reach him at ryan at cetech dot ai if the portal "
+            "fails.",  # obfuscated shape: named false negative
+            "Order 771-229 totals 2799 units; batch 36C10B27Q0056 "
+            "is an identifier, not contact data.",
+        ]
+        for i, prose in enumerate(prose_cases):
+            state = fresh_state()
+            rid = f"person-prose-{i}"
+            S.t_record_ingest(state, _person_payload(
+                rid, {"name": "Prose Case", "summary": prose}))
+            analytic = S.t_record_read(
+                state, {"record_id": rid, "surface": "analytic"})
+            self.assertEqual(analytic["fields"]["summary"], prose,
+                             f"prose case {i} was mangled")
+
+    def test_fixture_corpus_rendering_unchanged(self):
+        """C0 scope guard: for every fixture record, fields outside
+        the by-name classes render byte-identical to the stored
+        values on BOTH surfaces (content scrub changes nothing)."""
+        state = ingest_all(fresh_state())
+        class_fields = {"emails", "email", "phone", "mobile", "tel",
+                        "name", "full_name"}
+        for rid, record in state["records"].items():
+            if record.get("status") == "merged_into":
+                continue
+            for surface in ("analytic", "owner"):
+                out = S.t_record_read(
+                    state, {"record_id": rid, "surface": surface})
+                for fname, fv in record["fields"].items():
+                    lowered = fname.lower()
+                    if lowered in class_fields or any(
+                            m in lowered
+                            for m in S.NULL_FIELD_MARKERS):
+                        continue
+                    self.assertEqual(
+                        out["fields"][fname], fv["value"],
+                        f"{rid}.{fname} changed on {surface}")
+
+
 class TestMerge(unittest.TestCase):
     def test_propose_only_until_confirmed(self):
         state = ingest_all(fresh_state())

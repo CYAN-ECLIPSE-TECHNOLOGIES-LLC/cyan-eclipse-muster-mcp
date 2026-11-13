@@ -31,7 +31,9 @@ This server is the SHARED CORE (spec sections 5-7). It owns:
   * the masking engine (Deep Field pattern) — field-level rules
     applied at egress: phone -> partial, email -> full on the owner
     surface / domain-only on analytic surfaces, government IDs /
-    payment data / health-adjacent fields -> null in v1;
+    payment data / health-adjacent fields -> null in v1; plus a
+    content-level pass on the analytic surface masking email-shaped
+    substrings inside free-text fields (GAP-C1-1);
   * the drafting service — reply drafts generated ONLY from record
     facts, each with a citation list. A fact not traceable to a
     record field cannot appear; gaps surface as MISSING_FACT markers
@@ -56,6 +58,7 @@ Policy: ./policy.json beside this file (floors + kill switches).
 import hashlib
 import json
 import os
+import re
 import sys
 import time
 from datetime import datetime, timezone
@@ -207,6 +210,26 @@ def verify_receipt_chain(receipts) -> bool:
 
 
 # ----------------------------------------------------------------- masking
+# Content-level masking (GAP-C1-1 cure, 2026-11-13): the field classes in
+# mask_value are assigned by field NAME, but a covered class can also
+# appear as content inside a free-text field — an email address printed
+# in a summary. On the analytic surface, email-shaped substrings in
+# string values are masked with the same rendering as the email field
+# class (domain only). Egress only: the owner surface and the stored
+# record are unchanged. Detection is shape-based; the false-negative
+# shape (quoted local parts, IP-literal domains, no-TLD addresses,
+# obfuscated prose addresses) is named in the cure record.
+_EMAIL_SHAPE = re.compile(
+    r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
+
+
+def _mask_email_content(text: str) -> str:
+    def repl(match):
+        _, _, domain = match.group(0).partition("@")
+        return f"***@{domain}" if domain else "***"
+    return _EMAIL_SHAPE.sub(repl, text)
+
+
 def mask_value(field: str, value, surface: str):
     """Deep Field-style egress masking (spec 5.5)."""
     if isinstance(value, list):
@@ -226,6 +249,11 @@ def mask_value(field: str, value, surface: str):
     if surface == "analytic" and name in ("name", "full_name"):
         parts = str(value).split()
         return " ".join(p[0] + "." for p in parts if p)
+    if surface == "analytic" and isinstance(value, str):
+        # Free-text content scrub (GAP-C1-1): a field not assigned the
+        # email class by name can still carry an email address as
+        # content. Mask it with the email class rendering.
+        return _mask_email_content(value)
     return value
 
 
@@ -647,6 +675,9 @@ def t_policy_show(state, args):
             "kill_reads": bool(POLICY.get("kill_reads")),
             "kill_writes": bool(POLICY.get("kill_writes")),
             "masking": {"email": "owner: full; analytic: domain-only",
+                        "free-text content": "analytic: email-shaped "
+                        "substrings masked domain-only (GAP-C1-1); "
+                        "owner: unmasked",
                         "phone": "partial (last 2)",
                         "gov_id/payment/health fields": "null (v1)"}}
 
