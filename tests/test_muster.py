@@ -460,6 +460,96 @@ class TestP14RefusalRecovery(unittest.TestCase):
         self.assertEqual(len(out2["restored_record_ids"]), 2)
 
 
+class TestP15StoredContentCensus(unittest.TestCase):
+    """P15 (MCP face): stored-content census vs disclosure + token
+    custody. Every stored field class per record kind is enumerated
+    and diffed against the disclosed inventory; receipt detail keys
+    likewise; the owner-confirm token is derived, never stored."""
+
+    RECORD_KEYS = {"record_id", "kind", "fields", "external_ids",
+                   "data_rights", "status", "ingested_at"}
+    # Disclosed stored field classes per kind (union over the C0
+    # fixture corpus). ssn_last4_note is a stored person field class
+    # whose egress is null on every surface (masking test, spec 5.5)
+    # — the census enumerates it; it is not an undisclosed class.
+    FIELD_CLASSES = {
+        "person": {"emails", "name", "phone", "role",
+                   "ssn_last4_note", "timezone"},
+        "company": {"domains", "industry", "name"},
+        "ticket": {"priority", "status", "subject"},
+        "conversation": {"messages"},
+        "activity": set(),
+    }
+    RECEIPT_DETAIL_KEYS = {
+        "record_ingested": {"field_count", "fields_hash", "kind",
+                            "quarantined_message_ids", "record_id",
+                            "tier", "verdict"},
+        "record_read": {"kind", "record_id", "surface", "tier",
+                        "verdict"},
+        "record_search": {"hit_count", "kind", "query_hash", "tier",
+                          "verdict"},
+        "merge_proposed": {"proposal_hash", "proposal_id",
+                           "record_ids", "tier", "verdict"},
+        "merge_execute_denied": {"proposal_id", "reason", "tier",
+                                 "verdict"},
+        "merge_executed": {"merged_record_id", "merge_id",
+                           "proposal_id", "tier", "verdict"},
+        "merge_unmerge_denied": {"merge_id", "tier", "verdict"},
+        "merge_unmerged": {"merge_id", "restored_record_ids",
+                           "tier", "verdict"},
+        "draft_created": {"draft_id", "missing_facts",
+                          "quarantine_flagged", "ticket_id", "tier",
+                          "verdict"},
+    }
+
+    def test_record_census_matches_disclosure(self):
+        state = ingest_all(fresh_state())
+        ingested = {r["record_id"]: set(r["fields"].keys())
+                    for r in FIXTURES}
+        for rec in state["records"].values():
+            self.assertLessEqual(set(rec.keys()), self.RECORD_KEYS,
+                                 rec["record_id"])
+            # No stored class beyond the disclosed per-kind union,
+            # and no class invented or dropped vs what was ingested.
+            self.assertLessEqual(set(rec["fields"].keys()),
+                                 self.FIELD_CLASSES[rec["kind"]],
+                                 rec["record_id"])
+            self.assertEqual(set(rec["fields"].keys()),
+                             ingested[rec["record_id"]],
+                             rec["record_id"])
+            for entry in rec["fields"].values():
+                self.assertIn("value", entry)
+                self.assertIn("provenance", entry)
+
+    def test_receipt_detail_census(self):
+        state = ingest_all(fresh_state())
+        S.t_record_read(state, {"record_id": "person-hubspot-1001",
+                                "surface": "analytic"})
+        S.t_record_search(state, {"kind": "person", "query": "maya"})
+        seen = {r["type"] for r in state["receipts"]}
+        for r in state["receipts"]:
+            self.assertIn(r["type"], self.RECEIPT_DETAIL_KEYS)
+            self.assertLessEqual(set(r["detail"].keys()),
+                                 self.RECEIPT_DETAIL_KEYS[r["type"]],
+                                 r["type"])
+        self.assertLessEqual(
+            {"record_ingested", "record_read", "record_search"}, seen)
+
+    def test_confirm_token_never_stored(self):
+        state = ingest_all(fresh_state())
+        out = S.t_merge_propose(state, {
+            "record_a": "person-hubspot-1001",
+            "record_b": "person-zendesk-2002"})
+        token = S.expected_merge_token(out["proposal"])
+        S.t_merge_execute(state, {
+            "proposal_id": out["proposal"]["proposal_id"],
+            "confirm_token": token})
+        blob = json.dumps(state)
+        self.assertNotIn(token, blob)
+        self.assertNotIn("confirm-merge-", blob)
+        self.assertNotIn("confirm-unmerge-", blob)
+
+
 if __name__ == "__main__":
     unittest.main()
 
