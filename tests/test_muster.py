@@ -846,6 +846,109 @@ class TestTreeHygieneGuard(unittest.TestCase):
             self.assertEqual(find_real_graph_data(root), [])
 
 
+class TestStatePath(unittest.TestCase):
+    """MUSTER-21 (K5 / QA P12): the default state path used to resolve
+    to data/state.json beside server.py — runtime state written into
+    the package/install location. The default now resolves to the
+    per-user data root on every platform; the explicit
+    ECLIPSE_MUSTER_STATE override still wins. (The earlier test-gap
+    TestP12StatePath proved only the env-set path; the default path
+    is covered here for the first time.)"""
+
+    def _default_with(self, platform, env):
+        import os
+        from unittest import mock
+        clean = {k: v for k, v in os.environ.items()
+                 if k not in ("ECLIPSE_MUSTER_STATE", "XDG_DATA_HOME",
+                              "LOCALAPPDATA")}
+        clean.update(env)
+        with mock.patch.object(sys, "platform", platform), \
+                mock.patch.dict(os.environ, clean, clear=True):
+            return S._default_state_path()
+
+    def test_default_linux_uses_xdg_data_home(self):
+        got = self._default_with("linux", {"XDG_DATA_HOME": "/tmp/xdg"})
+        self.assertEqual(got, Path("/tmp/xdg/eclipse-muster/state.json"))
+
+    def test_default_linux_falls_back_to_home_share(self):
+        got = self._default_with("linux", {})
+        self.assertEqual(got, Path.home() / ".local" / "share"
+                         / "eclipse-muster" / "state.json")
+
+    def test_default_windows_uses_localappdata(self):
+        got = self._default_with(
+            "win32", {"LOCALAPPDATA": "C:/Users/x/AppData/Local"})
+        self.assertEqual(got, Path("C:/Users/x/AppData/Local")
+                         / "EclipseMuster" / "state.json")
+
+    def test_default_macos_uses_application_support(self):
+        got = self._default_with("darwin", {})
+        self.assertEqual(got, Path.home() / "Library"
+                         / "Application Support" / "EclipseMuster"
+                         / "state.json")
+
+    def test_default_is_never_beside_server(self):
+        for platform in ("linux", "win32", "darwin"):
+            got = self._default_with(platform, {})
+            self.assertNotEqual(got.parent, S.HERE)
+            self.assertNotEqual(got, S.HERE / "data" / "state.json")
+
+    def test_override_wins_on_every_platform(self):
+        for platform in ("linux", "win32", "darwin"):
+            got = self._default_with(
+                platform, {"ECLIPSE_MUSTER_STATE": "/estate/store.json"})
+            self.assertEqual(got, Path("/estate/store.json"))
+
+    def _run_server(self, env_extra, payload):
+        import os
+        import subprocess
+        env = {k: v for k, v in os.environ.items()
+               if k != "ECLIPSE_MUSTER_STATE"}
+        env.update(env_extra)
+        proc = subprocess.Popen(
+            [sys.executable, str(S.HERE / "server.py")],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            text=True, cwd=str(S.HERE), env=env)
+        try:
+            def call(req):
+                proc.stdin.write(json.dumps(req) + "\n")
+                proc.stdin.flush()
+                return json.loads(proc.stdout.readline())
+            call({"jsonrpc": "2.0", "id": 1, "method": "initialize",
+                  "params": {"protocolVersion": "2025-03-26"}})
+            return call({"jsonrpc": "2.0", "id": 2,
+                         "method": "tools/call",
+                         "params": {"name": "record_ingest",
+                                    "arguments": payload}})
+        finally:
+            proc.stdin.close()
+            proc.wait(timeout=30)
+            proc.stdout.close()
+
+    def test_fresh_process_default_writes_only_to_per_user_root(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            resp = self._run_server({"XDG_DATA_HOME": td}, FIXTURES[0])
+            self.assertNotIn("error", resp)
+            written = Path(td) / "eclipse-muster" / "state.json"
+            self.assertTrue(written.exists())
+            self.assertFalse((S.HERE / "data" / "state.json").exists())
+
+    def test_fresh_process_override_wins_and_writes_only_there(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            target = Path(td) / "custom" / "state-c1-check.json"
+            resp = self._run_server(
+                {"ECLIPSE_MUSTER_STATE": str(target),
+                 "XDG_DATA_HOME": str(Path(td) / "xdg")}, FIXTURES[0])
+            self.assertNotIn("error", resp)
+            self.assertTrue(target.exists())
+            self.assertFalse(
+                (Path(td) / "xdg" / "eclipse-muster"
+                 / "state.json").exists())
+            self.assertFalse((S.HERE / "data" / "state.json").exists())
+
+
 if __name__ == "__main__":
     unittest.main()
 
