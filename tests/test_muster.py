@@ -228,6 +228,51 @@ class TestChain(unittest.TestCase):
             self.assertNotIn(forbidden, names)
 
 
+class TestP10StdioLaunch(unittest.TestCase):
+    """P10 (MCP face): the artefact as served launches and serves.
+
+    An MCP stdio server has no installer; its launch proof is the
+    subprocess launch of the shipped server.py: initialize handshake
+    + the full tool list, from a clean process, temp state."""
+
+    def test_stdio_launch_handshake_and_tools(self):
+        import os
+        import subprocess
+        import tempfile
+        here = Path(__file__).parent.parent
+        with tempfile.TemporaryDirectory() as tmp:
+            env = dict(os.environ)
+            env["ECLIPSE_MUSTER_STATE"] = str(Path(tmp) / "state.json")
+            env["PYTHONDONTWRITEBYTECODE"] = "1"
+            proc = subprocess.Popen(
+                [sys.executable, str(here / "server.py")],
+                stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                text=True, cwd=str(here), env=env)
+            try:
+                def rpc(rid, method, params=None):
+                    proc.stdin.write(json.dumps(
+                        {"jsonrpc": "2.0", "id": rid, "method": method,
+                         "params": params or {}}) + "\n")
+                    proc.stdin.flush()
+                    return json.loads(proc.stdout.readline())
+                init = rpc(1, "initialize",
+                           {"protocolVersion": "2024-11-05",
+                            "capabilities": {},
+                            "clientInfo": {"name": "p10-test",
+                                           "version": "0"}})
+                self.assertEqual(
+                    init["result"]["serverInfo"]["name"], "eclipse-muster")
+                tools = rpc(2, "tools/list")
+                names = {t["name"]
+                         for t in tools["result"]["tools"]}
+                self.assertEqual(names, set(S.TOOLS.keys()))
+                self.assertEqual(len(names), 9)
+            finally:
+                proc.stdin.close()
+                proc.wait(timeout=10)
+            self.assertEqual(proc.returncode, 0)
+
+
 if __name__ == "__main__":
     unittest.main()
 
