@@ -273,6 +273,43 @@ class TestP10StdioLaunch(unittest.TestCase):
             self.assertEqual(proc.returncode, 0)
 
 
+class TestP11PackagingCensus(unittest.TestCase):
+    """P11 (MCP face): packaging completeness vs the declared set.
+
+    Muster has NO native dependencies (pure Python stdlib) — the
+    native-module census of P11 is NOT-APPLICABLE in kind; the
+    applicable census is: every file the wheel/sdist force-include
+    list declares actually exists, and server.py imports stdlib
+    only, so no host-pruned dependency can be missing at runtime."""
+
+    def test_force_included_files_exist(self):
+        here = Path(__file__).parent.parent
+        pyproject = (here / "pyproject.toml").read_text()
+        declared = set()
+        for line in pyproject.splitlines():
+            line = line.strip()
+            if line.startswith('"') and '" = "' in line:
+                declared.add(line.split('"')[1])
+        self.assertGreaterEqual(len(declared), 4)
+        for rel in sorted(declared):
+            self.assertTrue((here / rel).is_file(),
+                            f"force-included file missing: {rel}")
+
+    def test_stdlib_only_imports(self):
+        import ast
+        here = Path(__file__).parent.parent
+        tree = ast.parse((here / "server.py").read_text())
+        imported = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                imported.update(a.name.split(".")[0]
+                                for a in node.names)
+            elif isinstance(node, ast.ImportFrom) and node.module:
+                imported.add(node.module.split(".")[0])
+        self.assertTrue(imported)
+        self.assertLessEqual(imported, set(sys.stdlib_module_names))
+
+
 if __name__ == "__main__":
     unittest.main()
 
