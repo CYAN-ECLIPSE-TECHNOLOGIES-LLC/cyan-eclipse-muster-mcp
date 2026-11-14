@@ -310,6 +310,75 @@ class TestP11PackagingCensus(unittest.TestCase):
         self.assertLessEqual(imported, set(sys.stdlib_module_names))
 
 
+class TestP12StatePath(unittest.TestCase):
+    """P12 (MCP face): runtime state goes only to the configured path.
+
+    The server's one runtime-state file is explicit
+    ($ECLIPSE_MUSTER_STATE, default ./data/state.json beside
+    server.py — documented in the module docstring). Exercising the
+    full tool surface over stdio with the env override set must
+    write that file and nothing else anywhere."""
+
+    def test_exercise_writes_only_configured_state(self):
+        import os
+        import subprocess
+        import tempfile
+        here = Path(__file__).parent.parent
+        before = {p.relative_to(here)
+                  for p in here.rglob("*") if p.is_file()
+                  and ".git" not in p.parts
+                  and "__pycache__" not in p.parts}
+        fixtures = json.loads(
+            (here / "fixtures" / "records.json").read_text())["records"]
+        with tempfile.TemporaryDirectory() as tmp:
+            state_path = Path(tmp) / "state.json"
+            env = dict(os.environ)
+            env["ECLIPSE_MUSTER_STATE"] = str(state_path)
+            env["PYTHONDONTWRITEBYTECODE"] = "1"
+            proc = subprocess.Popen(
+                [sys.executable, str(here / "server.py")],
+                stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                text=True, cwd=tmp, env=env)
+            try:
+                def rpc(rid, method, params=None):
+                    proc.stdin.write(json.dumps(
+                        {"jsonrpc": "2.0", "id": rid, "method": method,
+                         "params": params or {}}) + "\n")
+                    proc.stdin.flush()
+                    return json.loads(proc.stdout.readline())
+                rpc(1, "initialize", {"protocolVersion": "2024-11-05"})
+                rid = 10
+                for rec in fixtures:
+                    rid += 1
+                    out = rpc(rid, "tools/call",
+                              {"name": "record_ingest", "arguments": rec})
+                    self.assertIn("result", out)
+                rid += 1
+                out = rpc(rid, "tools/call",
+                          {"name": "receipt_list", "arguments": {}})
+                self.assertIn("result", out)
+            finally:
+                proc.stdin.close()
+                proc.wait(timeout=10)
+            # The configured state file is the ONLY file in the cwd,
+            # and it landed exactly where configured.
+            self.assertTrue(state_path.is_file())
+            self.assertEqual(
+                [p.name for p in Path(tmp).iterdir()], ["state.json"])
+            saved = json.loads(state_path.read_text())
+            self.assertEqual(len(saved["records"]), len(fixtures))
+        after = {p.relative_to(here)
+                 for p in here.rglob("*") if p.is_file()
+                 and ".git" not in p.parts
+                 and "__pycache__" not in p.parts}
+        self.assertEqual(before, after,
+                         "exercise wrote files beside the server")
+
+    def test_default_state_path_is_the_documented_one(self):
+        self.assertEqual(S.STATE_PATH.name, "state.json")
+        self.assertEqual(S.STATE_PATH.parent.name, "data")
+
+
 if __name__ == "__main__":
     unittest.main()
 
