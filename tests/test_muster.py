@@ -412,6 +412,54 @@ class TestP13ClaimTrace(unittest.TestCase):
         self.assertIn("Customer Graph", meta["description"])
 
 
+class TestP14RefusalRecovery(unittest.TestCase):
+    """P14 (MCP face): owner-confirm refusals name the remedy, are
+    receipted, leave no stuck state, and recover in-session.
+
+    The refusal surface of an MCP server is its tool error +
+    receipt ledger: the error must state what was refused and the
+    remedy (the owner-confirm token bound to the proposal hash),
+    the denial must be receipted, and presenting the remedy in the
+    SAME session (no restart, same state) must succeed."""
+
+    def test_merge_refusal_then_remedy_same_session(self):
+        state = ingest_all(fresh_state())
+        out = S.t_merge_propose(state, {
+            "record_a": "person-hubspot-1001",
+            "record_b": "person-zendesk-2002"})
+        proposal = out["proposal"]
+        with self.assertRaises(S.ToolError) as ctx:
+            S.t_merge_execute(state, {
+                "proposal_id": proposal["proposal_id"],
+                "confirm_token": "confirm-merge-wrong"})
+        msg = str(ctx.exception)
+        # Remedy named in the refusal itself.
+        self.assertIn("owner-confirm token", msg)
+        self.assertIn("proposal hash", msg)
+        # Denial receipted; nothing merged; proposal still usable.
+        self.assertEqual(state["receipts"][-1]["type"],
+                         "merge_execute_denied")
+        self.assertEqual(state["receipts"][-1]["detail"]["verdict"],
+                         "DENY")
+        self.assertEqual(proposal["status"], "proposed")
+        # Remedy in the same session succeeds — no restart.
+        res = S.t_merge_execute(state, {
+            "proposal_id": proposal["proposal_id"],
+            "confirm_token": S.expected_merge_token(proposal)})
+        self.assertIn("merged_record_id", res)
+        # Unmerge refusal follows the same shape, then recovers.
+        with self.assertRaises(S.ToolError) as ctx2:
+            S.t_merge_unmerge(state, {
+                "merge_id": res["merge_id"], "confirm_token": "nope"})
+        self.assertIn("confirm", str(ctx2.exception).lower())
+        self.assertEqual(state["receipts"][-1]["type"],
+                         "merge_unmerge_denied")
+        out2 = S.t_merge_unmerge(state, {
+            "merge_id": res["merge_id"],
+            "confirm_token": f"confirm-unmerge-{res['merge_id']}"})
+        self.assertEqual(len(out2["restored_record_ids"]), 2)
+
+
 if __name__ == "__main__":
     unittest.main()
 
