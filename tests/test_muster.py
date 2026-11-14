@@ -379,6 +379,39 @@ class TestP12StatePath(unittest.TestCase):
         self.assertEqual(S.STATE_PATH.parent.name, "data")
 
 
+class TestP13ClaimTrace(unittest.TestCase):
+    """P13 (MCP face): public claims traced to the shipped surface.
+
+    The README tool table must name exactly the tools the server
+    actually serves; the status claims (C0, synthetic fixtures
+    only, no credential, no platform contacted, bench pending)
+    must be present in the public copy — an unscoped claim or a
+    phantom tool is a defect."""
+
+    def test_readme_tool_table_matches_registry(self):
+        import re
+        here = Path(__file__).parent.parent
+        readme = (here / "README.md").read_text()
+        claimed = set(re.findall(r"^\| `([a-z_]+)` \|", readme,
+                                 flags=re.M))
+        self.assertEqual(claimed, set(S.TOOLS.keys()))
+
+    def test_status_claims_present_and_scoped(self):
+        here = Path(__file__).parent.parent
+        for doc in ("README.md", "PYPI_README.md"):
+            text = (here / doc).read_text().lower()
+            self.assertIn("synthetic", text, doc)
+            self.assertIn("no credential", text, doc)
+            self.assertIn("bench pending", text, doc)
+            self.assertNotIn("certified", text, doc)
+
+    def test_server_json_identity_matches_server(self):
+        here = Path(__file__).parent.parent
+        meta = json.loads((here / "server.json").read_text())
+        self.assertEqual(meta["title"], "Cyan Eclipse Muster MCP")
+        self.assertIn("Customer Graph", meta["description"])
+
+
 if __name__ == "__main__":
     unittest.main()
 

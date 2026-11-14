@@ -48,7 +48,7 @@ MCP client config:
 - Policy floors live in `policy.json`, shipped beside the server in
   the wheel (override with `ECLIPSE_MUSTER_POLICY`); state persists in
   `data/state.json` (override with `ECLIPSE_MUSTER_STATE`).
-- Certified (local) by the Eclipse Test Bench at v0.1.0; the listing
+- No certification is claimed — bench pending at v0.1.0; the listing
   status in the Eclipse Bazaar catalog is in-development.
 
 Powered by Cyan Eclipse Technologies LLC (cetech.ai) — a Veteran-Owned
