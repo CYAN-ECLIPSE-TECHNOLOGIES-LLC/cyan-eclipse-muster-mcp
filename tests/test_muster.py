@@ -762,6 +762,90 @@ class TestChain(unittest.TestCase):
             self.assertNotIn(forbidden, names)
 
 
+def find_real_graph_data(root):
+    """MUSTER-22 guard: real (non-fixture) graph state must never sit
+    in the source tree. Returns a list of offending paths under root.
+
+    A file offends when (a) its name marks it as a C1 / firm-graph
+    store, (b) it lives under a tree-resident data/ directory, or
+    (c) it parses as a Muster state document (records + proposals +
+    merges + receipts) carrying any records at all. The shipped
+    synthetic C0 fixture file (fixtures/records.json, a bare
+    {"records": [...]} list document) matches none of these.
+    """
+    import os
+    offenders = []
+    state_keys = {"records", "proposals", "merges", "receipts"}
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames
+                       if d not in (".git", "__pycache__")]
+        for name in filenames:
+            path = Path(dirpath) / name
+            rel = path.relative_to(root)
+            if name.startswith("state-c1") or "firm-graph" in name:
+                offenders.append(str(rel))
+                continue
+            if "data" in rel.parts[:-1] and name.endswith(".json"):
+                offenders.append(str(rel))
+                continue
+            if name.endswith(".json"):
+                try:
+                    doc = json.loads(path.read_text())
+                except Exception:
+                    continue
+                if (isinstance(doc, dict) and state_keys <= set(doc)
+                        and isinstance(doc.get("records"), dict)
+                        and doc["records"]):
+                    offenders.append(str(rel))
+    return offenders
+
+
+class TestTreeHygieneGuard(unittest.TestCase):
+    """MUSTER-22 (K2): the C1 firm graph sat untracked in this tree
+    (data/state-c1-firm-graph.json, 218 real records) while the
+    shipped wheel stayed clean only by force-include luck. The store
+    now lives in the estate live-store root outside the tree; this
+    guard fails if real graph data ever reappears in the tree."""
+
+    def test_tree_carries_no_real_graph_data(self):
+        root = Path(__file__).parent.parent
+        self.assertEqual(find_real_graph_data(root), [])
+
+    def test_guard_catches_planted_c1_store(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            planted = root / "data" / "state-c1-firm-graph.json"
+            planted.parent.mkdir(parents=True)
+            planted.write_text(json.dumps({
+                "records": {"person-real": {"kind": "person"}},
+                "proposals": {}, "merges": {}, "drafts": {},
+                "receipts": [{"seq": 1}]}))
+            self.assertEqual(find_real_graph_data(root),
+                             ["data/state-c1-firm-graph.json"])
+
+    def test_guard_catches_state_document_under_any_name(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            (root / "backup.json").write_text(json.dumps({
+                "records": {"person-real": {"kind": "person"}},
+                "proposals": {}, "merges": {}, "drafts": {},
+                "receipts": []}))
+            self.assertEqual(find_real_graph_data(root), ["backup.json"])
+
+    def test_guard_allows_fixtures_and_manifests(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            (root / "fixtures").mkdir()
+            (root / "fixtures" / "records.json").write_text(
+                (Path(__file__).parent.parent / "fixtures"
+                 / "records.json").read_text())
+            (root / "policy.json").write_text("{}")
+            self.assertEqual(find_real_graph_data(root), [])
+
+
 if __name__ == "__main__":
     unittest.main()
 
