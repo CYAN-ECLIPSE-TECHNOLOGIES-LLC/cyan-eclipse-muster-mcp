@@ -32,6 +32,11 @@ jobs:
             python -m json.tool "$f" > /dev/null && echo "OK $f"
           done
 
+      # Full suite incl. QA-PATTERNS P10–P15 pattern tests
+      # (test-gap fill 2026-11-14, MUS-ESC-010..015).
+      - name: Unit + pattern suite
+        run: python -m unittest discover -s tests
+
       # smoke.py drives the full tool surface over stdio; it is not run
       # in CI — the initialize handshake below is the CI smoke.
       - name: MCP initialize handshake smoke
