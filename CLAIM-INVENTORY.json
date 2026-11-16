@@ -1,0 +1,41 @@
+{
+ "product": "Cyan Eclipse Muster",
+ "version": "0.1.1",
+ "surface_hashes": {
+  "README.md": "8c27f533d8aa68eede5ff63c4dcf2f5a81aed0d9e8a8400d333e3027d91cb298",
+  "PYPI_README.md": "7755051fa551f0a1e655e5d962c4c088147ec17342e13ed924138e116633d570",
+  "bazaar-manifest.json": "4c45eed84b81478f6cb093d1ddfbca6292c463fff45b6143fc90b80f9619f6fa"
+ },
+ "traces": [
+  {
+   "sentence_sha256": "0f1dd2c45ce6afd3",
+   "sentence": "**No platform is contacted, no credential exists in this build, no message is sent from here, and no certification is claimed — bench pending.** The shipped fixtures and the server's default state are",
+   "basis": "README.md posture statement, self-evidencing in tree: no certification claimed, bench pending (re-bench filed BENCH-REQUEST-REBENCH-DRIFTED-STAGED-20261116.md; standing CERTIFIED(local) card covers 0.1.0 only, eclipse-muster-mcp-2026-10-25-2.json); C0 synthetic fixtures = fixtures/records.json"
+  },
+  {
+   "sentence_sha256": "cccecf7a86d2685d",
+   "sentence": "- Bench pending — no certification is claimed.",
+   "basis": "PYPI_README.md status line: bench pending, no certification claimed — same basis as README.md trace 0f1dd2c45ce6afd3; listing status in-development per bazaar-manifest.json status field"
+  },
+  {
+   "sentence_sha256": "70e8368a3669be60",
+   "sentence": "(Earlier copies of this readme claimed a local certification; that claim was withdrawn as contradictory in the MUSTER-10 disclosure cure, 2026-11-13.) Powered by Cyan Eclipse Technologies LLC (cetech.",
+   "basis": "MUSTER-10 disclosure cure, 2026-11-13 (the withdrawal the sentence itself records; cured cross-surface certification statements verified in the 2026-11-14 Coding Standard census, CENSUS.md Muster 3.15); firm identity line = Cyan Eclipse Technologies LLC, SAM.gov-registered VOSB of record"
+  },
+  {
+   "sentence_sha256": "272b8278a167845b",
+   "sentence": "MIT licensed.",
+   "basis": "LICENSE in tree (full MIT text) + pyproject.toml license field; also traced by the tree licence in CM-6 itself"
+  },
+  {
+   "sentence_sha256": "d61205a930739a5b",
+   "sentence": "{\"bench\":{\"bench_verdict\":\"BENCH PENDING — no certification claimed\",\"certified\":false,\"certified_scope\":null,\"checks\":[\"field without provenance refused BY NAME at ingest\",\"receipt ledger carries no ",
+   "basis": "bazaar-manifest.json bench block, self-evidencing: bench_verdict 'BENCH PENDING — no certification claimed', certified:false, certified_scope:null; scorecard_ref test-bench/results/eclipse-muster-mcp-2026-10-25-2.json (Verity, 0.1.0 scope)"
+  },
+  {
+   "sentence_sha256": "eaa4d058bd5d450a",
+   "sentence": "Every governed action appends to a hash-chained, content-free receipt ledger.\",\"icon\":\"icon-512.png\",\"name\":\"Eclipse Muster MCP\",\"powered_by\":\"Cyan Eclipse Technologies\",\"price_model\":\"Free local v0.1",
+   "basis": "bazaar-manifest.json price_model field: 'Free local v0.1; family pricing TBD per spec' — no price adopted for Muster (production-readiness STATE-CHECK 2026-11-16, money state: NONE adopted, no pricing pass); receipt-ledger sentence = server.py receipt ledger implementation (hash-chained, content-free)"
+  }
+ ]
+}
