@@ -62,6 +62,17 @@ Every record's Data Rights block carries a retention value (default `graph-cache
 
 The denylist is stated in code: no `record_delete`, `platform_merge`, `reply_send`, `email_send`, `bulk_update`, `macro_edit`, `trigger_edit`, and no session/scraping route exists at any tier (spec §§4.1, 6.2).
 
+## Your store — the tenant-local story
+
+Muster runs against one store file per deployment: your deployment, your file, your disk. The server is pointed at it with the `ECLIPSE_MUSTER_STATE` environment variable (the state-path contract); with no override it uses the per-user data root named under "Run it" below. The shipped tool for the store's life cycle is `tools/tenant_store.py` (stdlib only, like the server):
+
+- Initialise: `python3 tools/tenant_store.py init --state /path/to/state.json` creates a fresh, empty store file and prints the state-path contract. It refuses to overwrite an existing file — a store is never silently reset.
+- Import: `python3 tools/tenant_store.py import --state /path/to/state.json --export tenant-export.json` bulk-loads canonical records from a tenant export file in the loader's JSON form (a bare list of ingest payloads, or a `{"records": [...]}` document). Every record goes through the server's own governed `record_ingest` path — provenance and the Data Rights Ledger are enforced by the server, a record that fails validation is rejected and named in the report, and the tool never writes record data into the store file itself. A production-shaped synthetic corpus for trying the path end to end ships at `fixtures/tenant-synthetic/` (all data invented).
+- Verify: `python3 tools/tenant_store.py verify --state /path/to/state.json` opens the store through the server and reports the receipt chain (`chain_valid`) plus per-kind record counts.
+- Back up: `python3 tools/tenant_store.py backup --state /path/to/state.json --out /path/to/backup.json` makes a byte copy of the store plus a sha256 manifest. Restore is file-level, no magic: stop the server, copy the backup bytes back over the store path, restart. Scheduling backups is the operator's job; the tool is deliberately just the copy + manifest.
+
+Posture notes, stated plainly: single tenant per deployment — there is no tenant isolation inside a store file, so separate tenants get separate deployments and separate files. Run one server process per store file: the server loads and rewrites the whole file per call with no file locking, so two processes pointed at one file can overwrite each other.
+
 ## Run it
 
 ```bash
