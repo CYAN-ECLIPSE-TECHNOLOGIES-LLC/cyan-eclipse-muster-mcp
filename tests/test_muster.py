@@ -837,16 +837,29 @@ class TestP11PackagingCensus(unittest.TestCase):
     def test_stdlib_only_imports(self):
         import ast
         here = Path(__file__).parent.parent
-        tree = ast.parse((here / "server.py").read_text())
-        imported = set()
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Import):
-                imported.update(a.name.split(".")[0]
-                                for a in node.names)
-            elif isinstance(node, ast.ImportFrom) and node.module:
-                imported.add(node.module.split(".")[0])
-        self.assertTrue(imported)
-        self.assertLessEqual(imported, set(sys.stdlib_module_names))
+        # MUSTER-26 licence leg — NAMED ADAPTATION A1 (see
+        # BENCH-REQUEST-DELTA-MUSTER-LICENCE-LEG-20261116): the
+        # census now covers licence.py as well — the gate module is
+        # held to the same stdlib-only rule (MUS-GEN-003) — and
+        # server.py may import exactly one first-party sibling,
+        # "licence", which ships beside server.py via the pyproject
+        # force-include list (census-tested above). No check is
+        # weakened: the stdlib bound still applies to every import
+        # in both files, and licence.py itself gets no exception.
+        for fname, extra in (("server.py", {"licence"}),
+                             ("licence.py", set())):
+            tree = ast.parse((here / fname).read_text())
+            imported = set()
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Import):
+                    imported.update(a.name.split(".")[0]
+                                    for a in node.names)
+                elif isinstance(node, ast.ImportFrom) and node.module:
+                    imported.add(node.module.split(".")[0])
+            self.assertTrue(imported, fname)
+            self.assertLessEqual(
+                imported, set(sys.stdlib_module_names) | extra,
+                fname)
 
 
 class TestP12StatePath(unittest.TestCase):

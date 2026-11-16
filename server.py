@@ -59,6 +59,10 @@ $XDG_DATA_HOME/eclipse-muster/state.json or
 ~/.local/share/eclipse-muster/state.json). Runtime state never
 lives beside this file / in the install location (MUSTER-21).
 Policy: ./policy.json beside this file (floors + kill switches).
+Licence: the licence gate (licence.py, MUSTER-26 leg) is UNARMED by
+default — no gate exists unless configuration names a licence state
+file (env ECLIPSE_MUSTER_LICENCE_STATE, or a policy.json "licence"
+block). Unconfigured, this server behaves exactly as v0.1.1.
 """
 import hashlib
 import json
@@ -68,6 +72,8 @@ import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+
+import licence as _licence
 
 HERE = Path(__file__).parent
 
@@ -274,6 +280,41 @@ def integrity_warning(receipts):
         "chain_valid": False}
 
 
+# ------------------------------------------------------------ licence gate
+# MUSTER-26 licence leg (2026-11-16): the gate is built ONCE from
+# configuration (env ECLIPSE_MUSTER_LICENCE_STATE /
+# ECLIPSE_MUSTER_LICENCE_URL, or the policy.json "licence" block).
+# Unconfigured -> LICENCE_GATE is None and every check below is a
+# no-op: behaviour is byte-for-byte v0.1.1. Armed -> the write-class
+# handlers consult the gate before any mutation; a refusal is a
+# typed ToolError naming the licence state, and the refusal itself
+# is receipted (IDs + state only, never artefact or token — spec
+# 5.5). Reads (record_read / record_search) and the diagnostic
+# surfaces (policy_show / receipt_list) are NEVER gated: the S12
+# posture — existing work stays readable in every licence state,
+# and the operator can always see the refusal's own evidence.
+def _build_licence_gate():
+    return _licence.licence_gate_from_env(os.environ, POLICY)
+
+
+LICENCE_GATE = _build_licence_gate()
+
+
+def check_licence(state, tool_name: str, action_class: str) -> None:
+    if LICENCE_GATE is None:
+        return
+    decision = LICENCE_GATE.check(_licence.PAID_BOUNDARY_FEATURE)
+    if decision.allowed:
+        return
+    emit_receipt(state, "licence_refused", {
+        "tool": tool_name, "licence_state": decision.state,
+        "tier": effective_tier(POLICY, action_class),
+        "verdict": "DENY"})
+    raise ToolError(
+        f"{decision.state}: licence gate refused {tool_name} "
+        f"({_licence.PAID_BOUNDARY_FEATURE}): {decision.detail}")
+
+
 # ----------------------------------------------------------------- masking
 # Content-level masking (GAP-C1-1 cure, 2026-11-13): the field classes in
 # mask_value are assigned by field NAME, but a covered class can also
@@ -437,6 +478,7 @@ def is_instruction_shaped(text) -> bool:
 
 
 def t_record_ingest(state, args):
+    check_licence(state, "record_ingest", "internal_write")
     check_kill(POLICY, "internal_write")
     kind = str(args.get("kind") or "").lower()
     if kind not in KINDS:
@@ -624,6 +666,7 @@ def enforce_retention(state, now=None) -> list:
 def t_retention_sweep(state, args):
     """Erasure-class operation (P7): confirm-gated. The confirm
     string must be supplied before anything is destroyed."""
+    check_licence(state, "retention_sweep", "destructive")
     check_kill(POLICY, "destructive")
     if str(args.get("confirm") or "") != "PURGE_EXPIRED":
         raise ToolError(
@@ -727,6 +770,7 @@ def _preview_hash(merged: dict) -> str:
 
 
 def t_merge_propose(state, args):
+    check_licence(state, "merge_propose", "internal_write")
     check_kill(POLICY, "internal_write")
     a = get_record(state, args.get("record_a"))
     b = get_record(state, args.get("record_b"))
@@ -770,6 +814,7 @@ def expected_merge_token(proposal):
 
 
 def t_merge_execute(state, args):
+    check_licence(state, "merge_execute", "graph_merge_execute")
     check_kill(POLICY, "graph_merge_execute")
     proposal = state["proposals"].get(str(args.get("proposal_id")))
     if not proposal:
@@ -834,6 +879,7 @@ def t_merge_execute(state, args):
 
 
 def t_merge_unmerge(state, args):
+    check_licence(state, "merge_unmerge", "graph_merge_execute")
     check_kill(POLICY, "graph_merge_execute")
     merge = state["merges"].get(str(args.get("merge_id")))
     if not merge:
@@ -882,6 +928,7 @@ def t_reply_draft(state, args):
     the fact source; linked Person/Company give the greeting + org.
     Customer-authored text is never a fact source (Law #1) — its
     quarantined items are reported, never quoted or obeyed."""
+    check_licence(state, "reply_draft", "draft_create")
     check_kill(POLICY, "draft_create")
     ticket = get_record(state, args.get("ticket_id"))
     if ticket["kind"] != "ticket":
@@ -1170,12 +1217,23 @@ def handle(req: dict):
 
 
 def main():
-    global POLICY
+    global POLICY, LICENCE_GATE
     try:
         POLICY = load_policy()
     except ToolError as exc:
         sys.stderr.write(f"eclipse-muster: policy rejected: {exc}\n")
         sys.exit(2)
+    LICENCE_GATE = _build_licence_gate()
+    if LICENCE_GATE is not None:
+        # Armed: check once at startup so the posture is on the
+        # record (stderr) before the first tool call. A refusal here
+        # does not exit the process — reads and diagnostics still
+        # serve; the gated handlers refuse per-operation.
+        _decision = LICENCE_GATE.check(_licence.PAID_BOUNDARY_FEATURE)
+        sys.stderr.write(
+            f"eclipse-muster: licence gate ARMED "
+            f"({_licence.PAID_BOUNDARY_FEATURE}): {_decision.state} "
+            f"— {_decision.detail}\n")
     for line in sys.stdin:
         line = line.strip()
         if not line:

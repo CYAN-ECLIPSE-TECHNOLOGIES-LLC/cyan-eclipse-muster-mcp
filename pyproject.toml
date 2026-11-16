@@ -37,12 +37,14 @@ eclipse-muster = "server:main"
 # is runtime data and ships beside server.py.
 [tool.hatch.build.targets.wheel.force-include]
 "server.py" = "server.py"
+"licence.py" = "licence.py"
 "bazaar-manifest.json" = "bazaar-manifest.json"
 "policy.json" = "policy.json"
 "fixtures/records.json" = "fixtures/records.json"
 
 [tool.hatch.build.targets.sdist.force-include]
 "server.py" = "server.py"
+"licence.py" = "licence.py"
 "bazaar-manifest.json" = "bazaar-manifest.json"
 "policy.json" = "policy.json"
 "fixtures/records.json" = "fixtures/records.json"
