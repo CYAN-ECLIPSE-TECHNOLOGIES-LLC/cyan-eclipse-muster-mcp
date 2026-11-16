@@ -853,8 +853,9 @@ class TestP12StatePath(unittest.TestCase):
     """P12 (MCP face): runtime state goes only to the configured path.
 
     The server's one runtime-state file is explicit
-    ($ECLIPSE_MUSTER_STATE, default ./data/state.json beside
-    server.py — documented in the module docstring). Exercising the
+    ($ECLIPSE_MUSTER_STATE override, else the per-user data root —
+    MUSTER-21 moved the default off ./data/state.json beside
+    server.py; documented in the module docstring). Exercising the
     full tool surface over stdio with the env override set must
     write that file and nothing else anywhere."""
 
@@ -914,8 +915,17 @@ class TestP12StatePath(unittest.TestCase):
                          "exercise wrote files beside the server")
 
     def test_default_state_path_is_the_documented_one(self):
+        # MERGE ADAPTATION (2026-11-16, second union merge): was
+        # ./data/state.json beside server.py at 0.1.0; MUSTER-21
+        # (origin line) moved the default to the per-user data root.
+        # Assertion updated to the new documented truth — name still
+        # state.json, parent is the eclipse-muster per-user dir, and
+        # the path is never beside server.py (same fact origin's
+        # TestStatePath.test_default_is_never_beside_server asserts).
         self.assertEqual(S.STATE_PATH.name, "state.json")
-        self.assertEqual(S.STATE_PATH.parent.name, "data")
+        self.assertEqual(S.STATE_PATH.parent.name, "eclipse-muster")
+        self.assertNotEqual(S.STATE_PATH.parent,
+                            Path(__file__).parent.parent / "data")
 
 
 class TestP13ClaimTrace(unittest.TestCase):
@@ -1087,6 +1097,193 @@ class TestP15StoredContentCensus(unittest.TestCase):
         self.assertNotIn(token, blob)
         self.assertNotIn("confirm-merge-", blob)
         self.assertNotIn("confirm-unmerge-", blob)
+
+
+def find_real_graph_data(root):
+    """MUSTER-22 guard: real (non-fixture) graph state must never sit
+    in the source tree. Returns a list of offending paths under root.
+
+    A file offends when (a) its name marks it as a C1 / firm-graph
+    store, (b) it lives under a tree-resident data/ directory, or
+    (c) it parses as a Muster state document (records + proposals +
+    merges + receipts) carrying any records at all. The shipped
+    synthetic C0 fixture file (fixtures/records.json, a bare
+    {"records": [...]} list document) matches none of these.
+    """
+    import os
+    offenders = []
+    state_keys = {"records", "proposals", "merges", "receipts"}
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames
+                       if d not in (".git", "__pycache__")]
+        for name in filenames:
+            path = Path(dirpath) / name
+            rel = path.relative_to(root)
+            if name.startswith("state-c1") or "firm-graph" in name:
+                offenders.append(str(rel))
+                continue
+            if "data" in rel.parts[:-1] and name.endswith(".json"):
+                offenders.append(str(rel))
+                continue
+            if name.endswith(".json"):
+                try:
+                    doc = json.loads(path.read_text())
+                except Exception:
+                    continue
+                if (isinstance(doc, dict) and state_keys <= set(doc)
+                        and isinstance(doc.get("records"), dict)
+                        and doc["records"]):
+                    offenders.append(str(rel))
+    return offenders
+
+
+class TestTreeHygieneGuard(unittest.TestCase):
+    """MUSTER-22 (K2): the C1 firm graph sat untracked in this tree
+    (data/state-c1-firm-graph.json, 218 real records) while the
+    shipped wheel stayed clean only by force-include luck. The store
+    now lives in the estate live-store root outside the tree; this
+    guard fails if real graph data ever reappears in the tree."""
+
+    def test_tree_carries_no_real_graph_data(self):
+        root = Path(__file__).parent.parent
+        self.assertEqual(find_real_graph_data(root), [])
+
+    def test_guard_catches_planted_c1_store(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            planted = root / "data" / "state-c1-firm-graph.json"
+            planted.parent.mkdir(parents=True)
+            planted.write_text(json.dumps({
+                "records": {"person-real": {"kind": "person"}},
+                "proposals": {}, "merges": {}, "drafts": {},
+                "receipts": [{"seq": 1}]}))
+            self.assertEqual(find_real_graph_data(root),
+                             ["data/state-c1-firm-graph.json"])
+
+    def test_guard_catches_state_document_under_any_name(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            (root / "backup.json").write_text(json.dumps({
+                "records": {"person-real": {"kind": "person"}},
+                "proposals": {}, "merges": {}, "drafts": {},
+                "receipts": []}))
+            self.assertEqual(find_real_graph_data(root), ["backup.json"])
+
+    def test_guard_allows_fixtures_and_manifests(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            (root / "fixtures").mkdir()
+            (root / "fixtures" / "records.json").write_text(
+                (Path(__file__).parent.parent / "fixtures"
+                 / "records.json").read_text())
+            (root / "policy.json").write_text("{}")
+            self.assertEqual(find_real_graph_data(root), [])
+
+
+class TestStatePath(unittest.TestCase):
+    """MUSTER-21 (K5 / QA P12): the default state path used to resolve
+    to data/state.json beside server.py — runtime state written into
+    the package/install location. The default now resolves to the
+    per-user data root on every platform; the explicit
+    ECLIPSE_MUSTER_STATE override still wins. (The earlier test-gap
+    TestP12StatePath proved only the env-set path; the default path
+    is covered here for the first time.)"""
+
+    def _default_with(self, platform, env):
+        import os
+        from unittest import mock
+        clean = {k: v for k, v in os.environ.items()
+                 if k not in ("ECLIPSE_MUSTER_STATE", "XDG_DATA_HOME",
+                              "LOCALAPPDATA")}
+        clean.update(env)
+        with mock.patch.object(sys, "platform", platform), \
+                mock.patch.dict(os.environ, clean, clear=True):
+            return S._default_state_path()
+
+    def test_default_linux_uses_xdg_data_home(self):
+        got = self._default_with("linux", {"XDG_DATA_HOME": "/tmp/xdg"})
+        self.assertEqual(got, Path("/tmp/xdg/eclipse-muster/state.json"))
+
+    def test_default_linux_falls_back_to_home_share(self):
+        got = self._default_with("linux", {})
+        self.assertEqual(got, Path.home() / ".local" / "share"
+                         / "eclipse-muster" / "state.json")
+
+    def test_default_windows_uses_localappdata(self):
+        got = self._default_with(
+            "win32", {"LOCALAPPDATA": "C:/Users/x/AppData/Local"})
+        self.assertEqual(got, Path("C:/Users/x/AppData/Local")
+                         / "EclipseMuster" / "state.json")
+
+    def test_default_macos_uses_application_support(self):
+        got = self._default_with("darwin", {})
+        self.assertEqual(got, Path.home() / "Library"
+                         / "Application Support" / "EclipseMuster"
+                         / "state.json")
+
+    def test_default_is_never_beside_server(self):
+        for platform in ("linux", "win32", "darwin"):
+            got = self._default_with(platform, {})
+            self.assertNotEqual(got.parent, S.HERE)
+            self.assertNotEqual(got, S.HERE / "data" / "state.json")
+
+    def test_override_wins_on_every_platform(self):
+        for platform in ("linux", "win32", "darwin"):
+            got = self._default_with(
+                platform, {"ECLIPSE_MUSTER_STATE": "/estate/store.json"})
+            self.assertEqual(got, Path("/estate/store.json"))
+
+    def _run_server(self, env_extra, payload):
+        import os
+        import subprocess
+        env = {k: v for k, v in os.environ.items()
+               if k != "ECLIPSE_MUSTER_STATE"}
+        env.update(env_extra)
+        proc = subprocess.Popen(
+            [sys.executable, str(S.HERE / "server.py")],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            text=True, cwd=str(S.HERE), env=env)
+        try:
+            def call(req):
+                proc.stdin.write(json.dumps(req) + "\n")
+                proc.stdin.flush()
+                return json.loads(proc.stdout.readline())
+            call({"jsonrpc": "2.0", "id": 1, "method": "initialize",
+                  "params": {"protocolVersion": "2025-03-26"}})
+            return call({"jsonrpc": "2.0", "id": 2,
+                         "method": "tools/call",
+                         "params": {"name": "record_ingest",
+                                    "arguments": payload}})
+        finally:
+            proc.stdin.close()
+            proc.wait(timeout=30)
+            proc.stdout.close()
+
+    def test_fresh_process_default_writes_only_to_per_user_root(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            resp = self._run_server({"XDG_DATA_HOME": td}, FIXTURES[0])
+            self.assertNotIn("error", resp)
+            written = Path(td) / "eclipse-muster" / "state.json"
+            self.assertTrue(written.exists())
+            self.assertFalse((S.HERE / "data" / "state.json").exists())
+
+    def test_fresh_process_override_wins_and_writes_only_there(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            target = Path(td) / "custom" / "state-c1-check.json"
+            resp = self._run_server(
+                {"ECLIPSE_MUSTER_STATE": str(target),
+                 "XDG_DATA_HOME": str(Path(td) / "xdg")}, FIXTURES[0])
+            self.assertNotIn("error", resp)
+            self.assertTrue(target.exists())
+            self.assertFalse(
+                (Path(td) / "xdg" / "eclipse-muster"
+                 / "state.json").exists())
+            self.assertFalse((S.HERE / "data" / "state.json").exists())
 
 
 if __name__ == "__main__":

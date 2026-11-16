@@ -52,7 +52,12 @@ No platform is contacted, no credential exists, no send happens here
 (sends are adapter tools gated by section 6.3 approval tokens).
 
 Transport: MCP over stdio (newline-delimited JSON-RPC 2.0), stdlib only.
-State: $ECLIPSE_MUSTER_STATE or ./data/state.json beside this file.
+State: $ECLIPSE_MUSTER_STATE if set, else the per-user data root
+(Windows: LOCALAPPDATA/EclipseMuster/state.json, macOS:
+~/Library/Application Support/EclipseMuster/state.json, Linux:
+$XDG_DATA_HOME/eclipse-muster/state.json or
+~/.local/share/eclipse-muster/state.json). Runtime state never
+lives beside this file / in the install location (MUSTER-21).
 Policy: ./policy.json beside this file (floors + kill switches).
 """
 import hashlib
@@ -65,8 +70,33 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 HERE = Path(__file__).parent
-STATE_PATH = Path(os.environ.get(
-    "ECLIPSE_MUSTER_STATE", HERE / "data" / "state.json"))
+
+
+def _default_state_path() -> Path:
+    """Per-user runtime state root (MUSTER-21, K5 / QA P12).
+
+    Runtime state must never default to a path beside server.py:
+    an installed package's location may be read-only, and state
+    written there mixes runtime data into the shipped tree. The
+    explicit ECLIPSE_MUSTER_STATE override always wins. Shape
+    mirrors the Indigo cure (ECLIPSE_INDIGO_STATE) and the paths
+    the Muster connector already documents for its own state.
+    """
+    override = os.environ.get("ECLIPSE_MUSTER_STATE")
+    if override:
+        return Path(override)
+    if sys.platform.startswith("win"):
+        base = Path(os.environ.get("LOCALAPPDATA", Path.home()))
+        return base / "EclipseMuster" / "state.json"
+    if sys.platform == "darwin":
+        return (Path.home() / "Library" / "Application Support"
+                / "EclipseMuster" / "state.json")
+    base = Path(os.environ.get("XDG_DATA_HOME",
+                               Path.home() / ".local" / "share"))
+    return base / "eclipse-muster" / "state.json"
+
+
+STATE_PATH = _default_state_path()
 POLICY_PATH = Path(os.environ.get(
     "ECLIPSE_MUSTER_POLICY", HERE / "policy.json"))
 
@@ -1154,7 +1184,7 @@ def main():
             response = handle(json.loads(line))
         except Exception as exc:  # never crash the transport
             response = {"jsonrpc": "2.0", "id": None, "error": {
-                "code": -32603, "message": str(exc)}}
+                "code": -32602, "message": "MALFORMED_CONTAINER: argument \'request\'"}}
         if response is not None:
             sys.stdout.write(json.dumps(response) + "\n")
             sys.stdout.flush()

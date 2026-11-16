@@ -70,7 +70,7 @@ python3 smoke.py             # end-to-end smoke over real stdio (temp state)
 python3 -m unittest discover tests
 ```
 
-State lives in `data/state.json` (override: `ECLIPSE_MUSTER_STATE`). Policy in `policy.json` (override: `ECLIPSE_MUSTER_POLICY`).
+State lives in the per-user data root by default — Windows `%LOCALAPPDATA%\EclipseMuster\state.json`, macOS `~/Library/Application Support/EclipseMuster/state.json`, Linux `$XDG_DATA_HOME/eclipse-muster/state.json` (or `~/.local/share/eclipse-muster/state.json`) — never beside the server or in the install location (override: `ECLIPSE_MUSTER_STATE`). Policy in `policy.json` (override: `ECLIPSE_MUSTER_POLICY`).
 
 ## Lineage
 

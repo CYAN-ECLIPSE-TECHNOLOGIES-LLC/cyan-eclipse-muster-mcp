@@ -52,7 +52,12 @@ MCP client config:
   content.
 - Policy floors live in `policy.json`, shipped beside the server in
   the wheel (override with `ECLIPSE_MUSTER_POLICY`); state persists in
-  `data/state.json` (override with `ECLIPSE_MUSTER_STATE`).
+  the per-user data root (`EclipseMuster/state.json` under
+  `%LOCALAPPDATA%` on Windows, `~/Library/Application
+  Support/EclipseMuster/state.json` on macOS,
+  `$XDG_DATA_HOME/eclipse-muster/state.json` or
+  `~/.local/share/eclipse-muster/state.json` on Linux; override
+  with `ECLIPSE_MUSTER_STATE`) — never beside the installed server.
 - Bench pending — no certification is claimed. The listing status
   in the Eclipse Bazaar catalog is in-development. (Earlier copies
   of this readme claimed a local certification; that claim was
