@@ -8,8 +8,13 @@ One canonical Customer Graph becomes governed reads, internal writes,
 and owner-approved drafts across the popular CRM and customer-service
 platforms, according to what each platform actually sanctions.
 
-**What this is not:** phase C0 is a local core over owner-fed records
-with synthetic fixtures. **No platform is contacted, no credential
+**What this is not:** phase C0 is a local core over owner-fed records;
+its fixtures and default state are synthetic. The source tree also
+ships C1 loader tooling (`tools/c1_loader.py`,
+`tools/c1_loader_slices.py`) used estate-side to ingest real records
+through the same governed `record_ingest` path into a separate C1
+store — that store is not the C0 fixture state and is not served as
+fixture data. **No platform is contacted by the server, no credential
 exists in this build, and no message is sent from here** — sends are
 adapter tools gated by owner approval tokens, elsewhere.
 
@@ -26,11 +31,11 @@ MCP client config:
 { "mcpServers": { "eclipse-muster": { "command": "uvx", "args": ["eclipse-muster"] } } }
 ```
 
-## Tools (9)
+## Tools (10)
 
 `record_ingest` · `record_read` · `record_search` · `merge_propose` ·
 `merge_execute` · `merge_unmerge` · `reply_draft` · `policy_show` ·
-`receipt_list`
+`receipt_list` · `retention_sweep`
 
 ## Honest scope
 
@@ -48,8 +53,11 @@ MCP client config:
 - Policy floors live in `policy.json`, shipped beside the server in
   the wheel (override with `ECLIPSE_MUSTER_POLICY`); state persists in
   `data/state.json` (override with `ECLIPSE_MUSTER_STATE`).
-- No certification is claimed — bench pending at v0.1.0; the listing
-  status in the Eclipse Bazaar catalog is in-development.
+- Bench pending — no certification is claimed. The listing status
+  in the Eclipse Bazaar catalog is in-development. (Earlier copies
+  of this readme claimed a local certification; that claim was
+  withdrawn as contradictory in the MUSTER-10 disclosure cure,
+  2026-11-13.)
 
 Powered by Cyan Eclipse Technologies LLC (cetech.ai) — a Veteran-Owned
 Small Business. MIT licensed.

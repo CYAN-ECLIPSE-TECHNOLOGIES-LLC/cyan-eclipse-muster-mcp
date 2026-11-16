@@ -2,7 +2,7 @@
 # Eclipse Muster MCP
 # Copyright © 2026 Cyan Eclipse Technologies LLC · cetech.ai
 
-"""Eclipse Muster MCP — v0.1.0, phase C0 (Customer Graph core).
+"""Eclipse Muster MCP — v0.1.1, phase C0 (Customer Graph core).
 
 Powered by Cyan Eclipse Technologies (cetech.ai).
 
@@ -31,7 +31,9 @@ This server is the SHARED CORE (spec sections 5-7). It owns:
   * the masking engine (Deep Field pattern) — field-level rules
     applied at egress: phone -> partial, email -> full on the owner
     surface / domain-only on analytic surfaces, government IDs /
-    payment data / health-adjacent fields -> null in v1;
+    payment data / health-adjacent fields -> null in v1; plus a
+    content-level pass on the analytic surface masking email-shaped
+    and phone-shaped substrings inside free-text fields (GAP-C1-1);
   * the drafting service — reply drafts generated ONLY from record
     facts, each with a citation list. A fact not traceable to a
     record field cannot appear; gaps surface as MISSING_FACT markers
@@ -56,6 +58,7 @@ Policy: ./policy.json beside this file (floors + kill switches).
 import hashlib
 import json
 import os
+import re
 import sys
 import time
 from datetime import datetime, timezone
@@ -193,24 +196,138 @@ def emit_receipt(state: dict, rtype: str, detail: dict) -> dict:
     return entry
 
 
-def verify_receipt_chain(receipts) -> bool:
+def verify_receipt_chain_detail(receipts) -> dict:
+    """QA-PATTERNS P6 cure (MUSTER-13, 2026-11-13): verification used
+    to return a bare bool, so a broken chain surfaced as one
+    `chain_valid: false` field and the divergence point was never
+    named. This returns the FIRST diverging receipt (its seq and the
+    reason) so the point of use can render a banner-class warning
+    naming that point."""
     prev = "GENESIS"
     for entry in receipts:
+        seq = entry.get("seq")
         if entry.get("prev_hash") != prev:
-            return False
+            return {"valid": False, "divergence_seq": seq,
+                    "reason": "prev_hash does not match the "
+                              "preceding receipt's hash"}
         expected = sha(prev + canon(
             {k: v for k, v in entry.items() if k != "hash"}))
         if entry.get("hash") != expected:
-            return False
+            return {"valid": False, "divergence_seq": seq,
+                    "reason": "receipt hash does not recompute "
+                              "from its contents"}
         prev = entry["hash"]
-    return True
+    return {"valid": True, "divergence_seq": None, "reason": None}
+
+
+def verify_receipt_chain(receipts) -> bool:
+    return verify_receipt_chain_detail(receipts)["valid"]
+
+
+def integrity_warning(receipts):
+    """Banner-class integrity warning for a diverged chain, or None
+    when the chain verifies. A bool, chip, pill, status row, or log
+    line does NOT satisfy P6 — callers surface this object whole."""
+    detail = verify_receipt_chain_detail(receipts)
+    if detail["valid"]:
+        return None
+    seq = detail["divergence_seq"]
+    return {
+        "class": "banner", "severity": "critical",
+        "title": "INTEGRITY WARNING — receipt chain divergence",
+        "divergence_seq": seq,
+        "message": (
+            f"INTEGRITY WARNING: the receipt chain diverges at "
+            f"receipt seq {seq} ({detail['reason']}). Receipts at "
+            f"and after seq {seq} must not be trusted until the "
+            f"divergence is investigated."),
+        "chain_valid": False}
 
 
 # ----------------------------------------------------------------- masking
+# Content-level masking (GAP-C1-1 cure, 2026-11-13): the field classes in
+# mask_value are assigned by field NAME, but a covered class can also
+# appear as content inside a free-text field — an email address printed
+# in a summary. On the analytic surface, substrings shaped like a
+# covered class are masked with that class's field rendering: email
+# shapes domain-only, phone shapes (strict NANP structure) as last-2.
+# These are exactly the content classes the field-level policy masks
+# (and the classes MUS-C1-005 names for prose). Egress only: the owner
+# surface and the stored record are unchanged. Detection is
+# shape-based; the false-negative shapes (quoted local parts,
+# IP-literal domains, no-TLD or obfuscated addresses; unseparated,
+# non-NANP, or spelled-out phone numbers) are named in the cure
+# record.
+_EMAIL_SHAPE = re.compile(
+    r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
+_PHONE_SHAPE = re.compile(
+    r"(?<!\d)(?:\+1[\s.\-]?)?(?:\(\d{3}\)\s?|\d{3}[\s.\-])"
+    r"\d{3}[\s.\-]\d{4}(?!\d)")
+# QA-PATTERNS P1 cure (MUSTER-9, 2026-11-13): the content scrub used
+# to cover email/phone shapes only, so SSN-shaped and card-shaped
+# content inside a free-text field (notes, conversation bodies,
+# ticket subjects) passed verbatim on every surface. Government-ID
+# and payment field classes are nulled on BOTH surfaces, so their
+# content shapes are scrubbed on both surfaces too.
+_SSN_SHAPE = re.compile(r"(?<!\d)\d{3}-\d{2}-\d{4}(?!\d)")
+_CARD_CANDIDATE = re.compile(r"(?<!\d)(?:\d[ \-]*){12,18}\d(?!\d)")
+
+
+def _luhn_ok(digits: str) -> bool:
+    total, alt = 0, False
+    for ch in reversed(digits):
+        d = int(ch)
+        if alt:
+            d *= 2
+            if d > 9:
+                d -= 9
+        total += d
+        alt = not alt
+    return total % 10 == 0
+
+
+def _mask_sensitive_content(text: str) -> str:
+    """Scrub SSN-shaped and (Luhn-valid) card-shaped substrings.
+    Applied on every surface: these classes are null-class."""
+    text = _SSN_SHAPE.sub("***", text)
+
+    def card_repl(match):
+        digits = "".join(ch for ch in match.group(0) if ch.isdigit())
+        if 13 <= len(digits) <= 19 and _luhn_ok(digits):
+            return "***"
+        return match.group(0)
+
+    return _CARD_CANDIDATE.sub(card_repl, text)
+
+
+def _mask_content(text: str) -> str:
+    def email_repl(match):
+        _, _, domain = match.group(0).partition("@")
+        return f"***@{domain}" if domain else "***"
+
+    def phone_repl(match):
+        digits = "".join(ch for ch in match.group(0) if ch.isdigit())
+        return f"***{digits[-2:]}" if len(digits) >= 2 else "***"
+
+    return _PHONE_SHAPE.sub(phone_repl,
+                            _EMAIL_SHAPE.sub(
+                                email_repl,
+                                _mask_sensitive_content(text)))
+
+
 def mask_value(field: str, value, surface: str):
     """Deep Field-style egress masking (spec 5.5)."""
     if isinstance(value, list):
         return [mask_value(field, item, surface) for item in value]
+    if isinstance(value, dict):
+        # P1 cure (MUSTER-9): structured values (conversation
+        # messages are lists of dicts) used to pass through verbatim
+        # because mask_value never recursed into dicts. Recurse with
+        # each sub-key as the field name so by-name classes inside a
+        # structure mask too, and string leaves get the content scrub
+        # for their surface.
+        return {key: mask_value(str(key), item, surface)
+                for key, item in value.items()}
     name = field.lower()
     if any(marker in name for marker in NULL_FIELD_MARKERS):
         return None
@@ -226,12 +343,41 @@ def mask_value(field: str, value, surface: str):
     if surface == "analytic" and name in ("name", "full_name"):
         parts = str(value).split()
         return " ".join(p[0] + "." for p in parts if p)
+    if surface == "analytic" and isinstance(value, str):
+        # Free-text content scrub (GAP-C1-1): a field not assigned a
+        # covered class by name can still carry that class as content.
+        # Mask it with the class rendering.
+        return _mask_content(value)
+    if isinstance(value, str):
+        # Owner surface: prose renders in full EXCEPT the null
+        # classes (government-ID / payment shapes), which are nulled
+        # by name on both surfaces and are scrubbed as content on
+        # both surfaces too (MUSTER-9).
+        return _mask_sensitive_content(value)
     return value
 
 
 def masked_fields(record: dict, surface: str) -> dict:
     return {field: mask_value(field, fv["value"], surface)
             for field, fv in record["fields"].items()}
+
+
+def masked_external_ids(record: dict) -> dict:
+    """P1 cure (MUSTER-9): external_ids used to be returned raw on
+    both surfaces — platform identifiers are still identifiers, and
+    a caller-supplied external id can itself carry personal data.
+    Egress renders each value as a truncated SHA-256 so records stay
+    correlatable across reads without the raw value crossing the
+    boundary. Internal lookups use the stored values, never this
+    rendering."""
+    return {key: f"sha256:{sha(str(val))[:12]}"
+            for key, val in (record.get("external_ids") or {}).items()}
+
+
+def validate_surface(surface: str) -> str:
+    if surface not in ("owner", "analytic"):
+        raise ToolError("surface must be 'owner' or 'analytic'")
+    return surface
 
 
 # ------------------------------------------------------------- record core
@@ -337,15 +483,15 @@ def get_record(state, record_id):
 
 def t_record_read(state, args):
     check_kill(POLICY, "read")
+    enforce_retention(state)
     record = get_record(state, args.get("record_id"))
-    surface = str(args.get("surface") or "analytic").lower()
-    if surface not in ("owner", "analytic"):
-        raise ToolError("surface must be 'owner' or 'analytic'")
+    surface = validate_surface(
+        str(args.get("surface") or "analytic").lower())
     receipt = emit_receipt(state, "record_read", {
         "record_id": record["record_id"], "kind": record["kind"],
         "tier": 0, "surface": surface, "verdict": "ALLOW"})
     return {"record_id": record["record_id"], "kind": record["kind"],
-            "external_ids": record["external_ids"],
+            "external_ids": masked_external_ids(record),
             "fields": masked_fields(record, surface),
             "provenance": {f: fv["provenance"]
                            for f, fv in record["fields"].items()},
@@ -355,12 +501,18 @@ def t_record_read(state, args):
 
 def t_record_search(state, args):
     check_kill(POLICY, "read")
+    enforce_retention(state)
     kind = str(args.get("kind") or "").lower()
     query = str(args.get("query") or "").lower()
-    surface = str(args.get("surface") or "analytic").lower()
+    # P1 cure (MUSTER-9): search never validated its surface, so a
+    # bogus surface string skipped every analytic mask. Validate
+    # exactly as record_read does — an unknown surface is an error,
+    # never an unmasked rendering.
+    surface = validate_surface(
+        str(args.get("surface") or "analytic").lower())
     hits = []
     for record in state["records"].values():
-        if record.get("status") == "merged_into":
+        if record.get("status") in ("merged_into", "retention_expired"):
             continue
         if kind and record["kind"] != kind:
             continue
@@ -377,6 +529,80 @@ def t_record_search(state, args):
         "query_hash": sha(query) if query else None,
         "hit_count": len(hits), "verdict": "ALLOW"})
     return {"hits": hits, "count": len(hits), "surface": surface}
+
+
+# ------------------------------------------------------- retention (P7)
+# QA-PATTERNS P7 cure (MUSTER-14, 2026-11-13): retention values used
+# to be stamped onto every record (data_rights.retention, default
+# "graph-cache-30d") and never enforced — nothing ever expired, and
+# merge snapshots kept full unmasked pre-merge copies indefinitely.
+# Now: retention is parsed and enforced, expired records are
+# dispositioned byte-level (field values destroyed, hash retained
+# as proof), snapshots are purged on unmerge, and a confirm-gated
+# retention_sweep tool is the erasure-class operation.
+
+def parse_retention_days(retention) -> int | None:
+    if not retention:
+        return None
+    match = re.search(r"(\d+)\s*d(?:ay)?s?\b", str(retention))
+    return int(match.group(1)) if match else None
+
+
+def _parse_iso(text):
+    try:
+        return datetime.fromisoformat(
+            str(text).replace("Z", "+00:00"))
+    except (ValueError, TypeError):
+        return None
+
+
+def enforce_retention(state, now=None) -> list:
+    """Disposition every active record whose retention has expired.
+    Returns the dispositioned record ids. Field VALUES are destroyed
+    (byte-level: the state no longer carries them); a hash of the
+    destroyed fields and the disposition itself are receipted."""
+    now = now or datetime.now(timezone.utc)
+    dispositioned = []
+    for record in state["records"].values():
+        if record.get("status") != "active":
+            continue
+        days = parse_retention_days(
+            (record.get("data_rights") or {}).get("retention"))
+        ingested = _parse_iso(record.get("ingested_at"))
+        if days is None or ingested is None:
+            continue
+        if (now - ingested).days < days:
+            continue
+        fields_hash = sha(canon(
+            {f: fv["value"] for f, fv in record["fields"].items()}))
+        record["fields"] = {}
+        record["status"] = "retention_expired"
+        record["retention_disposition"] = {
+            "disposition": "field values destroyed at retention "
+                           "expiry",
+            "retention": record["data_rights"]["retention"],
+            "fields_hash": fields_hash,
+            "expired_at": now_iso()}
+        emit_receipt(state, "retention_expired", {
+            "record_id": record["record_id"],
+            "kind": record["kind"], "tier": 3,
+            "fields_hash": fields_hash, "verdict": "ALLOW"})
+        dispositioned.append(record["record_id"])
+    return dispositioned
+
+
+def t_retention_sweep(state, args):
+    """Erasure-class operation (P7): confirm-gated. The confirm
+    string must be supplied before anything is destroyed."""
+    check_kill(POLICY, "destructive")
+    if str(args.get("confirm") or "") != "PURGE_EXPIRED":
+        raise ToolError(
+            "CONFIRM_REQUIRED: retention_sweep destroys the field "
+            "values of retention-expired records; pass "
+            "confirm='PURGE_EXPIRED' to proceed")
+    dispositioned = enforce_retention(state)
+    return {"dispositioned_record_ids": dispositioned,
+            "count": len(dispositioned)}
 
 
 # ------------------------------------------------------------ merge engine
@@ -418,6 +644,58 @@ def merge_evidence(a: dict, b: dict) -> dict:
                        "classes; matching is evidence, not proof"}
 
 
+def compute_merged_record(a: dict, b: dict, kind: str,
+                          merged_id: str) -> dict:
+    """QA-PATTERNS P8 cure (MUSTER-15, 2026-11-13): ONE computation
+    for the merged record, used by BOTH merge_propose (to render the
+    preview) and merge_execute (to apply). Previously propose
+    computed evidence over name fields while execute computed the
+    result by a separate first-value-wins path, and the result was
+    never previewed — preview and apply were different code paths.
+    Per-platform values survive: a conflicting second value is
+    retained under a platform-suffixed field key."""
+    merged_fields = {}
+    for source in (a, b):
+        for field, fv in source["fields"].items():
+            if field not in merged_fields:
+                merged_fields[field] = json.loads(json.dumps(fv))
+            elif canon(merged_fields[field]["value"]) != \
+                    canon(fv["value"]):
+                plat = fv["provenance"]["platform"]
+                merged_fields[f"{field}@{plat}"] = json.loads(
+                    json.dumps(fv))
+    return {
+        "record_id": merged_id, "kind": kind,
+        "external_ids": {**a["external_ids"], **b["external_ids"]},
+        "fields": merged_fields,
+        "data_rights": json.loads(json.dumps(a["data_rights"])),
+        "status": "active",
+        "merged_from": [a["record_id"], b["record_id"]],
+    }
+
+
+def preview_merged_record(merged: dict) -> dict:
+    """The preview rendering of a computed merged record: the same
+    object execute will store, rendered through the analytic egress
+    masks (external_ids hashed per MUSTER-9). A caller comparing
+    this preview against record_read(analytic) of the executed
+    record compares equal, field for field."""
+    return {"record_id": merged["record_id"],
+            "kind": merged["kind"],
+            "external_ids": masked_external_ids(merged),
+            "fields": {field: mask_value(field, fv["value"],
+                                         "analytic")
+                       for field, fv in merged["fields"].items()},
+            "data_rights": merged["data_rights"],
+            "merged_from": list(merged["merged_from"])}
+
+
+def _preview_hash(merged: dict) -> str:
+    return sha(canon({k: merged[k] for k in (
+        "record_id", "kind", "external_ids", "fields",
+        "data_rights", "merged_from")}))
+
+
 def t_merge_propose(state, args):
     check_kill(POLICY, "internal_write")
     a = get_record(state, args.get("record_a"))
@@ -437,6 +715,16 @@ def t_merge_propose(state, args):
     proposal["proposal_hash"] = sha(canon(
         {k: proposal[k] for k in ("proposal_id", "kind", "record_a",
                                   "record_b", "evidence")}))
+    # P8: compute the result NOW, through the same function execute
+    # will use, and bind the proposal to its hash. Execute refuses
+    # if the recomputed result no longer matches this preview.
+    merged_id = f"{proposal['kind']}-merged-" \
+                f"{proposal['proposal_hash'][:8]}"
+    merged_preview = compute_merged_record(a, b, proposal["kind"],
+                                           merged_id)
+    proposal["preview_merged_record"] = preview_merged_record(
+        merged_preview)
+    proposal["preview_hash"] = _preview_hash(merged_preview)
     state["proposals"][proposal_id] = proposal
     receipt = emit_receipt(state, "merge_proposed", {
         "proposal_id": proposal_id,
@@ -475,24 +763,18 @@ def t_merge_execute(state, args):
                 "record_b": json.loads(json.dumps(b))}
     merged_id = f"{proposal['kind']}-merged-" \
                 f"{proposal['proposal_hash'][:8]}"
-    merged_fields = {}
-    for source in (a, b):
-        for field, fv in source["fields"].items():
-            if field not in merged_fields:
-                merged_fields[field] = fv
-            # per-platform values are never destroyed: a conflicting
-            # second value is retained under a platform-suffixed key.
-            elif canon(merged_fields[field]["value"]) != canon(fv["value"]):
-                plat = fv["provenance"]["platform"]
-                merged_fields[f"{field}@{plat}"] = fv
-    merged = {
-        "record_id": merged_id, "kind": proposal["kind"],
-        "external_ids": {**a["external_ids"], **b["external_ids"]},
-        "fields": merged_fields,
-        "data_rights": a["data_rights"],
-        "ingested_at": now_iso(), "status": "active",
-        "merged_from": [a["record_id"], b["record_id"]],
-    }
+    # P8 (MUSTER-15): apply through the SAME computation the
+    # proposal previewed, and refuse if the records have moved
+    # since the preview — a stale preview never silently applies a
+    # different result.
+    merged = compute_merged_record(a, b, proposal["kind"], merged_id)
+    if proposal.get("preview_hash") and \
+            _preview_hash(merged) != proposal["preview_hash"]:
+        raise ToolError(
+            "PREVIEW_DIVERGED: the merged result no longer matches "
+            "the proposal preview (a source record changed after "
+            "proposing); re-run merge_propose for a fresh preview")
+    merged["ingested_at"] = now_iso()
     state["records"][merged_id] = merged
     a["status"] = "merged_into"
     b["status"] = "merged_into"
@@ -500,7 +782,13 @@ def t_merge_execute(state, args):
     merge_record = {"merge_id": f"merge-{proposal['proposal_hash'][:10]}",
                     "proposal_id": proposal["proposal_id"],
                     "merged_record_id": merged_id,
-                    "snapshot": snapshot, "status": "active"}
+                    "snapshot": snapshot, "status": "active",
+                    # P7 (MUSTER-14): the snapshot's full copies are
+                    # retained ONLY while the merge is active (they
+                    # are the unmerge mechanism) and are purged at
+                    # unmerge, leaving the snapshot hash as proof.
+                    "snapshot_retention": "retained while merge "
+                    "active; purged on unmerge (hash retained)"}
     state["merges"][merge_record["merge_id"]] = merge_record
     receipt = emit_receipt(state, "merge_executed", {
         "merge_id": merge_record["merge_id"],
@@ -540,6 +828,13 @@ def t_merge_unmerge(state, args):
         merged["status"] = "split"
         state["records"].pop(merge["merged_record_id"], None)
     merge["status"] = "unmerged"
+    # P7 (MUSTER-14): unmerge consumes the snapshot — purge the full
+    # pre-merge copies so no unmasked snapshot survives the unmerge
+    # indefinitely. The hash (already receipted at execute) remains.
+    merge["snapshot"] = {
+        "disposition": "purged_on_unmerge",
+        "snapshot_hash": sha(canon(snap)),
+        "purged_at": now_iso()}
     receipt = emit_receipt(state, "merge_unmerged", {
         "merge_id": merge["merge_id"],
         "restored_record_ids": [snap["record_a"]["record_id"],
@@ -597,24 +892,46 @@ def t_reply_draft(state, args):
                 quarantined_seen.append(msg.get("message_id"))
     resolution = fact(ticket, "resolution")
     lines = []
-    if requester_name:
-        lines.append(f"Hello {str(requester_name).split()[0]},")
+    # A whitespace-only name is truthy but splits to nothing — the
+    # bare split()[0] raised IndexError. Fall back to the neutral
+    # greeting whenever no name token survives the split.
+    name_parts = str(requester_name).split() if requester_name else []
+    if name_parts:
+        lines.append(f"Hello {name_parts[0]},")
     else:
         lines.append("Hello,")
+    # P1 cure (MUSTER-9): interpolated facts used to enter the draft
+    # raw — a card number, phone, email, or SSN sitting in a ticket
+    # subject/resolution was quoted verbatim into the draft body.
+    # Every interpolated value now passes the full content scrub
+    # (sensitive shapes on all surfaces + email/phone shapes) before
+    # it can appear in a draft.
     if subject:
         lines.append(
-            f"Thank you for contacting us about: {subject}.")
+            f"Thank you for contacting us about: "
+            f"{_mask_content(str(subject))}.")
     if status:
-        lines.append(f"Your ticket is currently recorded as: {status}.")
+        lines.append(
+            f"Your ticket is currently recorded as: "
+            f"{_mask_content(str(status))}.")
     missing = []
     if resolution:
-        lines.append(f"Recorded resolution: {resolution}")
+        lines.append(
+            f"Recorded resolution: {_mask_content(str(resolution))}")
     else:
         missing.append("resolution")
         lines.append(
             "[MISSING_FACT: resolution — no resolution is recorded "
             "on this ticket; no outcome is asserted]")
     lines.append("We will follow up from this record.")
+    # QA-PATTERNS P4 cure (MUSTER-11, 2026-11-13): drafts carried no
+    # author/agent attribution anywhere — a reader could not tell
+    # AI-applied content from human writing. The attribution now
+    # travels in the body itself (so it survives export) AND as
+    # structured fields on the draft object.
+    lines.append(
+        "— Draft authored by an AI agent (Cyan Eclipse Muster "
+        "reply_draft); not sent. Review before use.")
     body = "\n".join(lines)
     draft_id = str(args.get("draft_id") or
                    f"draft-{sha(body)[:10]}")
@@ -623,7 +940,14 @@ def t_reply_draft(state, args):
              "missing_facts": missing,
              "quarantined_message_ids": quarantined_seen,
              "content_hash": sha(body), "created_at": now_iso(),
-             "status": "draft"}
+             "status": "draft",
+             "author": {"type": "ai_agent",
+                        "tool": "reply_draft",
+                        "product": "Cyan Eclipse Muster"},
+             "attribution": "AI-AGENT-AUTHORED — generated by "
+                            "Cyan Eclipse Muster reply_draft from "
+                            "record facts only; not human-written "
+                            "and not sent"}
     state["drafts"][draft_id] = draft
     receipt = emit_receipt(state, "draft_created", {
         "draft_id": draft_id, "ticket_id": ticket["record_id"],
@@ -643,7 +967,16 @@ def t_policy_show(state, args):
             "kill_reads": bool(POLICY.get("kill_reads")),
             "kill_writes": bool(POLICY.get("kill_writes")),
             "masking": {"email": "owner: full; analytic: domain-only",
+                        "free-text content": "analytic: email-shaped "
+                        "substrings masked domain-only and "
+                        "phone-shaped substrings masked last-2 "
+                        "(GAP-C1-1); SSN-shaped and card-shaped "
+                        "substrings masked on every surface; "
+                        "structured values (conversation messages) "
+                        "masked recursively (MUSTER-9)",
                         "phone": "partial (last 2)",
+                        "external_ids": "truncated sha256 hash on "
+                        "every surface (MUSTER-9)",
                         "gov_id/payment/health fields": "null (v1)"}}
 
 
@@ -652,8 +985,18 @@ def t_receipt_list(state, args):
     receipts = state["receipts"]
     if limit is not None:
         receipts = receipts[-int(limit):]
-    return {"receipts": receipts, "count": len(state["receipts"]),
-            "chain_valid": verify_receipt_chain(state["receipts"])}
+    detail = verify_receipt_chain_detail(state["receipts"])
+    out = {"receipts": receipts, "count": len(state["receipts"]),
+           "chain_valid": detail["valid"],
+           "chain_divergence_seq": detail["divergence_seq"],
+           "chain_divergence_reason": detail["reason"]}
+    warning = integrity_warning(state["receipts"])
+    if warning is not None:
+        # P6: the warning is a top-level banner-class field of the
+        # result — the point of use cannot render this result
+        # without encountering it.
+        out["integrity_warning"] = warning
+    return out
 
 
 TOOLS = {
@@ -728,6 +1071,14 @@ TOOLS = {
         "List the append-only, hash-chained receipts and verify the "
         "chain. Receipts carry IDs + hashes only — never content.",
         {"limit": {"type": "integer"}}, []),
+    "retention_sweep": (
+        t_retention_sweep,
+        "Erasure-class (T3): destroy the field values of every "
+        "record whose stamped retention has expired, leaving a "
+        "hash + disposition receipt. Confirm-gated: requires "
+        "confirm='PURGE_EXPIRED'. Retention is also enforced on "
+        "record_read / record_search.",
+        {"confirm": {"type": "string"}}, ["confirm"]),
 }
 
 # Capability denylist, stated in code: the core sends nothing,
@@ -753,7 +1104,7 @@ def handle(req: dict):
             "protocolVersion": req.get("params", {}).get(
                 "protocolVersion", "2025-03-26"),
             "capabilities": {"tools": {}},
-            "serverInfo": {"name": "eclipse-muster", "version": "0.1.0"}}}
+            "serverInfo": {"name": "eclipse-muster", "version": "0.1.1"}}}
     if method == "ping":
         return {"jsonrpc": "2.0", "id": rid, "result": {}}
     if method == "tools/list":
