@@ -203,13 +203,45 @@ def empty_state() -> dict:
 
 def load_state() -> dict:
     if STATE_PATH.exists():
-        return json.loads(STATE_PATH.read_text())
+        try:
+            state = json.loads(STATE_PATH.read_text())
+        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+            # ZTE F-MUS-1 cure (2026-11-20): a state file truncated
+            # by a kill mid-save used to raise a bare JSONDecodeError
+            # outside handle()'s ToolError path, wedging every
+            # tools/call behind a generic MALFORMED_CONTAINER that
+            # blamed the request and dropped its id. Refuse by name
+            # instead, with the recovery routes stated.
+            raise ToolError(
+                f"STATE_CORRUPT: the state file at {STATE_PATH} is "
+                f"not valid JSON ({exc}); it was likely truncated "
+                f"by an interrupted save. No tool call can proceed "
+                f"against it. Recovery: restore the store from a "
+                f"tenant_store backup (copy the backup bytes over "
+                f"the state path), or delete the state file to "
+                f"start fresh with an empty store.")
+        if not isinstance(state, dict) or "records" not in state:
+            raise ToolError(
+                f"STATE_CORRUPT: the state file at {STATE_PATH} "
+                f"does not hold a Muster store (no 'records' map). "
+                f"Recovery: restore the store from a tenant_store "
+                f"backup, or delete the state file to start fresh "
+                f"with an empty store.")
+        return state
     return empty_state()
 
 
 def save_state(state: dict) -> None:
+    # ZTE F-MUS-1 cure (2026-11-20): atomic save — write a
+    # pid-named temp file in the same directory, then os.replace
+    # (the licence.py _persist pattern already in-tree). A kill
+    # mid-save can now leave at worst a stale temp file beside a
+    # complete previous state, never a truncated state file.
     STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    STATE_PATH.write_text(json.dumps(state, indent=1))
+    tmp = STATE_PATH.with_name(
+        f"{STATE_PATH.name}.tmp-{os.getpid()}")
+    tmp.write_text(json.dumps(state, indent=1))
+    os.replace(tmp, STATE_PATH)
 
 
 # ---------------------------------------------------------------- receipts
@@ -533,6 +565,13 @@ def t_record_search(state, args):
     check_kill(POLICY, "read")
     enforce_retention(state)
     kind = str(args.get("kind") or "").lower()
+    # ZTE F-MUS-2 cure (2026-11-20): search validates kind exactly
+    # as ingest does. An unknown kind used to filter to a silent
+    # {hits: [], count: 0} — indistinguishable from "no such
+    # records". An empty kind still means "all kinds".
+    if kind and kind not in KINDS:
+        raise ToolError(f"unknown record kind '{kind}' "
+                        f"(one of {sorted(KINDS)})")
     query = str(args.get("query") or "").lower()
     # P1 cure (MUSTER-9): search never validated its surface, so a
     # bogus surface string skipped every analytic mask. Validate
@@ -902,13 +941,28 @@ def t_reply_draft(state, args):
     requester_name = None
     requester_id = (ticket.get("external_ids") or {}).get("requester")
     person = None
-    for rec in state["records"].values():
-        if rec["kind"] == "person" and rec.get("status") == "active" \
-                and (rec["record_id"] == args.get("person_id")
-                     or requester_id in (rec.get("external_ids")
-                                          or {}).values()):
-            person = rec
-            break
+    if args.get("person_id") is not None:
+        # ZTE F-MUS-3 cure (2026-11-20): an explicitly named
+        # person_id is a primary reference — resolve it strictly.
+        # It used to be one side of an OR lookup, so a nonexistent
+        # person_id silently fell through to the requester-linked
+        # person and the draft was built from a different person
+        # than the caller named. get_record refuses unknown or
+        # merged ids by name.
+        named = get_record(state, args.get("person_id"))
+        if named["kind"] != "person":
+            raise ToolError(
+                f"reply_draft person_id is not a person record: "
+                f"{args.get('person_id')}")
+        person = named
+    else:
+        for rec in state["records"].values():
+            if rec["kind"] == "person" \
+                    and rec.get("status") == "active" \
+                    and requester_id in (rec.get("external_ids")
+                                         or {}).values():
+                person = rec
+                break
     if person:
         requester_name = fact(person, "name")
     # Scan the linked conversation for quarantined customer content:
@@ -1147,7 +1201,17 @@ def handle(req: dict):
             return {"jsonrpc": "2.0", "id": rid, "error": {
                 "code": -32602,
                 "message": f"unknown or C0-forbidden tool {name}"}}
-        state = load_state()
+        try:
+            state = load_state()
+        except ToolError as exc:
+            # Named state refusal (F-MUS-1): the request id is
+            # preserved and the state file is named — never the
+            # generic transport refusal, and nothing is saved over
+            # the unreadable file.
+            return {"jsonrpc": "2.0", "id": rid, "result": {
+                "content": [{"type": "text",
+                             "text": json.dumps({"error": str(exc)})}],
+                "isError": True}}
         try:
             out = TOOLS[name][0](state, args)
             save_state(state)

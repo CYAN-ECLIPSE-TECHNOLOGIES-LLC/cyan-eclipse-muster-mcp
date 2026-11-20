@@ -58,6 +58,10 @@ MCP client config:
   `$XDG_DATA_HOME/eclipse-muster/state.json` or
   `~/.local/share/eclipse-muster/state.json` on Linux; override
   with `ECLIPSE_MUSTER_STATE`) — never beside the installed server.
+  Reset route: there is no in-server reset command; to reset, stop
+  the server and delete the state file — removing the store file
+  removes the store entirely, and the next start begins from an
+  empty store. Take a backup first; removal is not undoable.
 - Bench pending — no certification is claimed. The listing status
   in the Eclipse Bazaar catalog is in-development. (Earlier copies
   of this readme claimed a local certification; that claim was
