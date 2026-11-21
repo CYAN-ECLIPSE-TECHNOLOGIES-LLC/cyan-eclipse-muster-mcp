@@ -1,0 +1,49 @@
+{
+ "_comment": "Synthetic retention-expired record (retention graph-cache-0d), imported separately in the proof transcript immediately before the retention_sweep step, because record_read/record_search also enforce retention and would disposition it earlier.",
+ "records": [
+  {
+   "kind": "person",
+   "record_id": "person-tenant-expired",
+   "external_ids": {
+    "tenant_crm": "ext-expired"
+   },
+   "fields": {
+    "name": "Expired Case",
+    "emails": [
+     "expired.case@example.com"
+    ],
+    "notes": "RETENTION-EXPIRED-SYNTHETIC"
+   },
+   "field_provenance": {
+    "name": {
+     "platform": "tenant-crm",
+     "platform_object_id": "c-expired",
+     "source": "import",
+     "observed_at": "2026-11-10T09:00:00Z",
+     "adapter_version": "tenant-store-1.0.0"
+    },
+    "emails": {
+     "platform": "tenant-crm",
+     "platform_object_id": "c-expired",
+     "source": "import",
+     "observed_at": "2026-11-10T09:00:00Z",
+     "adapter_version": "tenant-store-1.0.0"
+    },
+    "notes": {
+     "platform": "tenant-crm",
+     "platform_object_id": "c-expired",
+     "source": "import",
+     "observed_at": "2026-11-10T09:00:00Z",
+     "adapter_version": "tenant-store-1.0.0"
+    }
+   },
+   "data_rights": {
+    "source_account": "tenant-owner-records",
+    "legal_basis": "tenant account-owner instruction (synthetic dataset, invented data only)",
+    "method": "tenant_store",
+    "retention": "graph-cache-0d",
+    "pii_class": "strictest"
+   }
+  }
+ ]
+}
