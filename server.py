@@ -2,7 +2,7 @@
 # Eclipse Muster MCP
 # Copyright © 2026 Cyan Eclipse Technologies LLC · cetech.ai
 
-"""Eclipse Muster MCP — v0.2.0-pilot.1, phase C0 (Customer Graph core).
+"""Eclipse Muster MCP — v0.2.0, phase C0 (Customer Graph core).
 
 Powered by Cyan Eclipse Technologies (cetech.ai).
 
@@ -1188,7 +1188,7 @@ def handle(req: dict):
             "protocolVersion": req.get("params", {}).get(
                 "protocolVersion", "2025-03-26"),
             "capabilities": {"tools": {}},
-            "serverInfo": {"name": "eclipse-muster", "version": "0.2.0-pilot.1"}}}
+            "serverInfo": {"name": "eclipse-muster", "version": "0.2.0"}}}
     if method == "ping":
         return {"jsonrpc": "2.0", "id": rid, "result": {}}
     if method == "tools/list":

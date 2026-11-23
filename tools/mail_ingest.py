@@ -56,7 +56,7 @@ ROOT = HERE.parent
 sys.path.insert(0, str(HERE))
 import tenant_store as T  # noqa: E402
 
-ADAPTER_VERSION = "mail-ingest-0.2.0-pilot.1"
+ADAPTER_VERSION = "mail-ingest-0.2.0"
 PLATFORM = "mailbox-export"
 
 # --- Class-C detectors (whole-record quarantine) -------------------

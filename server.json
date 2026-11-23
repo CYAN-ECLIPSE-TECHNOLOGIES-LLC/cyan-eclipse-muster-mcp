@@ -3,7 +3,7 @@
  "name": "io.github.CYAN-ECLIPSE-TECHNOLOGIES-LLC/muster",
  "title": "Cyan Eclipse Muster MCP",
  "description": "The Customer Graph core: one register of the people an account serves, with provenance on every",
- "version": "0.2.0-pilot.1",
+ "version": "0.2.0",
  "websiteUrl": "https://eclipsebazaar.com",
  "icons": [
   {
@@ -22,7 +22,7 @@
   {
    "registryType": "pypi",
    "identifier": "eclipse-muster",
-   "version": "0.2.0-pilot.1",
+   "version": "0.2.0",
    "runtimeHint": "uvx",
    "transport": {
     "type": "stdio"

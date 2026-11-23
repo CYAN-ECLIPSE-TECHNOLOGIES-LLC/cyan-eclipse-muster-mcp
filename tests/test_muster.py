@@ -620,7 +620,7 @@ class TestP5VersionLockstep(unittest.TestCase):
 
     def test_all_version_surfaces_agree(self):
         version = (self.ROOT / "VERSION").read_text().strip()
-        self.assertEqual(version, "0.2.0-pilot.1")
+        self.assertEqual(version, "0.2.0")
         pyproject = (self.ROOT / "pyproject.toml").read_text()
         self.assertIn(f'version = "{version}"', pyproject)
         server_json = json.loads((self.ROOT / "server.json")
